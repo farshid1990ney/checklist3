@@ -6512,6 +6512,19 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
   const drawing = useRef(false);
   const last = useRef({ x: 0, y: 0 });
   const strokeVersion = useRef(0); // برای رفع رقابت بازیابی snapshot با کشیدن تازه (پایین را ببینید)
+  // رفع باگ «انگشت می‌کشم ولی خط نشان داده نمی‌شود»:
+  // ۱) در موبایل، شنونده‌ی touchmove از نوع passive است و preventDefault کار
+  //    نمی‌کند → حرکت انگشت به‌جای ترسیم صفحه را اسکرول می‌کرد و حرکت با
+  //    touchcancel نیمه‌کاره می‌ماند. راه‌حل استاندارد CSS است: touch-action:none
+  //    روی خود بوم (پایین) + مدیریت onTouchCancel.
+  // ۲) بعد از touchend، مرورگر رویدادهای ماوسِ شبیه‌سازی‌شده می‌فرستد که خط
+  //    اضافه/نقطه‌ی سرگردان می‌ساخت — با مهر زمانی آخرین لمس رد می‌شوند.
+  const lastTouchRef = useRef(0);
+  const isStaleMouse = (e) => {
+    if (e && e.touches && e.touches.length) return false;
+    const t = lastTouchRef.current;
+    return !!t && (Date.now() - t) < 800;
+  };
   const [color, setColor] = useState('#0f172a');
   const [thickness, setThickness] = useState(3);
   const [hasDrawn, setHasDrawn] = useState(false);
@@ -6530,7 +6543,7 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
     setSaving(false);
 
     // رفع ایراد ۲-۹: هنگام تغییر اندازه/چرخش گوشی، امضای کشیده‌شده پاک نمی‌شود
-    const resize = () => {
+    const resize = (retries) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       // رفع ایراد P3-۱۳: اگر resize دقیقاً وسط کشیدن رخ دهد (چرخش گوشی یا
@@ -6540,7 +6553,16 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
       drawing.current = false;
       last.current = null;
       const parent = canvas.parentElement;
-      if (!parent || !parent.clientWidth) return;
+      if (!parent || !parent.clientWidth || !parent.clientHeight) {
+        // رفع باگ «خط‌ها جای اشتباه/هیچ»: اگر مودال تازه mount شده و هنوز
+        // layout نگرفته باشد (انیمیشن باز شدن، فونت در حال بارگذاری، کیبورد
+        // موبایل)، بوم در اندازه‌ی پیش‌فرض ۳۰۰×۱۵۰ می‌ماند و با CSS کشیده
+        // می‌شود → ترسیم با جای انگشت نمی‌خواند. چند بار کوتاه دوباره تلاش
+        // می‌کنیم تا parent اندازه‌ی واقعی بگیرد.
+        const left = Number(retries) || 0;
+        if (left > 0 && open) setTimeout(() => resize(left - 1), 120);
+        return;
+      }
       const ratio = window.devicePixelRatio || 1;
       const w = parent.clientWidth, h = parent.clientHeight;
       let snapshot = null;
@@ -6575,7 +6597,7 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
         img.src = snapshot;
       }
     };
-    resize();
+    resize(8);
     window.addEventListener('resize', resize);
     window.addEventListener('orientationchange', resize);
     return () => {
@@ -6599,16 +6621,31 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
   };
 
   const start = (e) => {
+    if (isStaleMouse(e)) return;
     e.preventDefault();
+    if (e && e.touches && e.touches.length) lastTouchRef.current = Date.now();
     drawing.current = true;
     strokeVersion.current += 1;
     last.current = getPos(e);
+    // یک ضربه‌ی کوتاه (بدون حرکت) هم باید ردپا بگذارد — نقطه‌ی اولیه
+    try {
+      const canvas0 = canvasRef.current;
+      const ctx0 = canvas0 && canvas0.getContext('2d');
+      if (ctx0) {
+        ctx0.fillStyle = color;
+        ctx0.beginPath();
+        ctx0.arc(last.current.x, last.current.y, Math.max(1, thickness / 2), 0, Math.PI * 2);
+        ctx0.fill();
+      }
+    } catch (err) { /* اگر نقطه‌ی اولیه نکشیده شد، خود حرکت بعدی ترسیم می‌کند */ }
     setHasDrawn(true);
     hasDrawnRef.current = true;
   };
   const move = (e) => {
     if (!drawing.current) return;
+    if (isStaleMouse(e)) return;
     e.preventDefault();
+    if (e && e.touches && e.touches.length) lastTouchRef.current = Date.now();
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     const pos = getPos(e);
@@ -6654,7 +6691,7 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] no-print bg-white flex flex-col" style={{ height: '100dvh' }}>
+    <div className="fixed inset-0 z-[70] no-print bg-white flex flex-col" style={{ height: '100dvh', overscrollBehavior: 'contain' }}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
         <div>
           <h3 className="font-bold text-slate-800">امضای دیجیتال — {roleLabel}</h3>
@@ -6680,8 +6717,9 @@ function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTi
         <canvas
           ref={canvasRef}
           className="signature-canvas absolute inset-0 w-full h-full"
+          style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
           onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
-          onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+          onTouchStart={start} onTouchMove={move} onTouchEnd={end} onTouchCancel={end}
         />
         {!hasDrawn && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 text-sm">
@@ -8133,6 +8171,112 @@ function exportRecordsCsv(records) {
 }
 
 /* ============================================================
+   ۱۵-ب‌. خروجی‌های فیلترشده: PDF پشت‌سرهم + گزارش عدم انطباق‌ها
+   ============================================================ */
+/** برگه‌ی ناموفق (عادی یا حیاتی) = عدم انطباق */
+function isNonconformingRecord(r) {
+  if (!r) return false;
+  return !!r.criticalFail || r.status === 'ناموفق' || r.status === 'ناموفق (حیاتی)';
+}
+
+/** نام فایل PDF خروجی با تاریخ شمسی امروز و تعداد برگه */
+function rangedPdfFileName(prefix, count) {
+  const j = (gregorianToJalaliStr(new Date()) || '').replace(/\//g, '-');
+  return prefix + '-' + j + '-' + count + '.pdf';
+}
+
+/**
+ * «PDF پشت‌سرهم»: همان رندرِ چاپ پشت‌سرهم (هر برگه پشت هم در یک سند A4)،
+ * این‌بار به‌صورت **فایل PDF دانلودشددنی** — با همان موتور html2pdf که برای
+ * PDF گوگل‌درایو استفاده می‌شود، پس خروجی دقیقاً شبیه برگه‌ی چاپی است.
+ */
+async function downloadSequentialPdf(records, org, notify) {
+  if (!Array.isArray(records) || !records.length) return false;
+  const bodyHtml = records.map(r => recordReportHtml(r, org)).join('');
+  const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
+  if (!b64) {
+    if (notify) notify('ساخت PDF ممکن نشد (کتابخانه در دسترس نیست). از دکمه‌ی «چاپ پشت‌سرهم» استفاده کنید.', 'error');
+    return false;
+  }
+  downloadBase64Pdf(b64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
+  if (notify) notify('PDF پشت‌سرهم (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
+  return true;
+}
+
+/* استایل مخصوص بخش‌های گزارش عدم انطباق (علاوه بر REPORT_STYLE) */
+const NC_STYLE = `
+  .nc-sec { border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px; margin-bottom:14px; page-break-inside:avoid; }
+  .nc-sec h3 { font-size:13px; margin:0 0 8px; }
+  .nc-bad { color:#b91c1c; font-weight:bold; }
+`;
+
+/**
+ * گزارش عدم انطباق‌ها: برای هر برگه‌ی ناموفق/حیاتی یک بخش مستقل با مشخصات
+ * برگه، فهرست آیتم‌های مغایر (نمره‌ی صفر)، یادداشت و در پایان خلاصه‌ی آماری
+ * و محل امضای تأیید مدیر. ورودی فقط برگه‌های عدم انطباق است.
+ */
+function nonconformityReportHtml(ncRecords, org, rangeLabel) {
+  const esc = escapeHtml;
+  const total = ncRecords.length;
+  const critical = ncRecords.filter(r => !!r.criticalFail || r.status === 'ناموفق (حیاتی)').length;
+  const sections = ncRecords.map(r => {
+    const failed = (r.details || []).filter(d => d && d.max > 0 && Number(d.earned) === 0);
+    const rows = failed.map(d => `
+      <tr>
+        <td>${esc(d.label)}</td>
+        <td>${d.value === false ? 'تأیید نشد' : esc(String(d.value === undefined || d.value === null || d.value === '' ? '—' : d.value))}</td>
+        <td>${d.critical ? '<b class="nc-bad">بله</b>' : 'خیر'}</td>
+      </tr>`).join('');
+    return `
+      <div class="nc-sec">
+        <h3>${esc(r.assetCode)} — ${esc(r.assetTitle || r.assetName || '')}</h3>
+        <table class="meta">
+          <tr><td>قالب</td><td>${esc(r.templateName)}</td><td>بازرس</td><td>${esc(r.inspectorName)}</td></tr>
+          <tr><td>تاریخ</td><td>${esc(toPersianDigits(r.date || gregorianToJalaliStr(r.completedAt)))}</td><td>نتیجه</td><td><b class="nc-bad">${esc(r.status)} (${toPersianDigits(r.percent)}٪)</b></td></tr>
+        </table>
+        ${rows
+          ? `<table class="results"><thead><tr><th>آیتم مغایر</th><th>پاسخ</th><th>حیاتی</th></tr></thead><tbody>${rows}</tbody></table>`
+          : '<div class="notes">ریز آیتم‌ها برای این برگه در دسترس نیست؛ وضعیت کلی برگه ناموفق است.</div>'}
+        ${r.notes ? `<div class="notes"><b>یادداشت:</b> ${esc(r.notes)}</div>` : ''}
+      </div>`;
+  }).join('');
+  return `
+    <div class="report">
+      <div class="hdr">
+        ${org.logoDataUrl ? `<img src="${esc(org.logoDataUrl)}" class="logo" />` : ''}
+        <div class="hdr-text"><div class="org-name">${esc(org.orgName || '')}</div><div class="sub">گزارش عدم انطباق‌های بازرسی</div></div>
+      </div>
+      <table class="meta">
+        <tr><td>بازه / فیلتر</td><td>${esc(rangeLabel || 'همه')}</td><td>تاریخ تهیه</td><td>${esc(toPersianDigits(gregorianToJalaliStr(new Date())))}</td></tr>
+      </table>
+      <div class="summary">
+        <div>تعداد عدم انطباق: <b>${toPersianDigits(total)}</b></div>
+        <div>ناموفق حیاتی: <b>${toPersianDigits(critical)}</b></div>
+        <div>ناموفق عادی: <b>${toPersianDigits(total - critical)}</b></div>
+      </div>
+      ${sections || '<div class="notes">موردی یافت نشد.</div>'}
+      <table class="meta" style="margin-top:18px"><tr><td>تأیید مدیر</td><td style="height:52px"></td><td>تاریخ</td><td></td></tr></table>
+    </div>`;
+}
+
+/** ساخت و دانلود PDF گزارش عدم انطباق‌ها */
+async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
+  if (!Array.isArray(ncRecords) || !ncRecords.length) {
+    if (notify) notify('در این مجموعه عدم انطباقی وجود ندارد.', 'error');
+    return false;
+  }
+  const bodyHtml = nonconformityReportHtml(ncRecords, org, rangeLabel);
+  const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE + NC_STYLE);
+  if (!b64) {
+    if (notify) notify('ساخت PDF ممکن نشد (کتابخانه در دسترس نیست).', 'error');
+    return false;
+  }
+  downloadBase64Pdf(b64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length));
+  if (notify) notify('گزارش عدم انطباق‌ها (' + toPersianDigits(ncRecords.length) + ' مورد) دانلود شد.', 'success');
+  return true;
+}
+
+/* ============================================================
    ۱۵-الف. صفحه «در انتظار امضا» (صف ارجاعات امضا)
    ============================================================ */
 /**
@@ -8757,6 +8901,11 @@ function RecordsPage({ focusRecordId, onFocusHandled }) {
   const [selected, setSelected] = useState([]);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('همه');
+  // فیلترهای پیشرفته: بازه‌ی زمانی شمسی + دسته‌بندی + فقط عدم انطباق‌ها
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [catFilter, setCatFilter] = useState('همه');
+  const [onlyNc, setOnlyNc] = useState(false);
   const [detailRec, setDetailRec] = useState(null);
   const [printing, setPrinting] = useState(false);
   const canManage = !!(perms && perms.canManage);
@@ -8791,11 +8940,29 @@ function RecordsPage({ focusRecordId, onFocusHandled }) {
   const filtered = data.records.filter(r => {
     const matchQ = ((r.assetCode || '') + (r.inspectorName || '') + (r.templateName || '')).toLowerCase().includes(query.toLowerCase());
     const matchS = statusFilter === 'همه' || r.status === statusFilter;
-    return matchQ && matchS;
+    // دسته‌بندی (برق / ماشین‌آلات / ...)
+    const matchC = catFilter === 'همه' || (r.category || '') === catFilter;
+    // بازه‌ی زمانی شمسی: مقایسه با زمان تکمیل برگه (یا زمان ساخت به‌عنوان جایگزین)
+    let matchD = true;
+    if (fromDate || toDate) {
+      const t = Date.parse(r.completedAt) || Number(r.createdAt) || 0;
+      if (fromDate) { const d = jalaliStrToDate(fromDate, false); if (d && t < d.getTime()) matchD = false; }
+      if (toDate) { const d = jalaliStrToDate(toDate, true); if (d && t > d.getTime()) matchD = false; }
+    }
+    const matchNc = !onlyNc || isNonconformingRecord(r);
+    return matchQ && matchS && matchC && matchD && matchNc;
   });
 
   const toggle = (id) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   const selectedRecords = data.records.filter(r => selected.includes(r.id));
+  // مجموعه‌ی هدف همه‌ی خروجی‌ها: برگه‌های تیک‌خورده؛ اگر چیزی تیک نخورده باشد،
+  // همه‌ی نتایج فیلترشده (تا خروجیِ یک بازه بدون تیک‌زدن ده‌ها برگه ممکن باشد).
+  const targetRecords = selected.length ? selectedRecords : filtered;
+  const ncCount = targetRecords.filter(isNonconformingRecord).length;
+  const filtersActive = !!(fromDate || toDate || catFilter !== 'همه' || onlyNc);
+  const rangeLabel = (fromDate || toDate)
+    ? 'بازه: ' + (fromDate ? toPersianDigits(fromDate) : 'ابتدا') + ' تا ' + (toDate ? toPersianDigits(toDate) : 'انتها') + (catFilter !== 'همه' ? ' — دسته: ' + catFilter : '')
+    : (catFilter !== 'همه' ? 'دسته: ' + catFilter : '');
 
   return (
     <div className="space-y-5">
@@ -8809,20 +8976,53 @@ function RecordsPage({ focusRecordId, onFocusHandled }) {
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className={inputCls + " max-w-[10rem]"}>
           {['همه', 'موفق', 'ناموفق', 'ناموفق (حیاتی)'].map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-slate-500 shrink-0">از</span>
+          <div className="w-[8.5rem]"><PersianDatePicker value={fromDate} onChange={setFromDate} placeholder="از تاریخ" /></div>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-slate-500 shrink-0">تا</span>
+          <div className="w-[8.5rem]"><PersianDatePicker value={toDate} onChange={setToDate} placeholder="تا تاریخ" /></div>
+        </div>
+        <select value={catFilter} onChange={e => setCatFilter(e.target.value)} className={inputCls + " max-w-[9rem]"}>
+          {['همه'].concat(data.categories || []).map(c => <option key={c} value={c}>{c === 'همه' ? 'همه‌ی دسته‌ها' : c}</option>)}
+        </select>
+        <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+          <input type="checkbox" checked={onlyNc} onChange={e => setOnlyNc(e.target.checked)} />
+          فقط عدم انطباق‌ها
+        </label>
+        {filtersActive && (
+          <button onClick={() => { setFromDate(''); setToDate(''); setCatFilter('همه'); setOnlyNc(false); }}
+            title="حذف همه‌ی فیلترهای بازه/دسته"
+            className="text-xs text-danger-600 hover:underline">✕ پاک‌کردن فیلترها</button>
+        )}
         <div className="flex-1"></div>
         {canManage && (
-          <div className="flex flex-wrap gap-2">
-            <button disabled={selected.length === 0 || printing} onClick={() => doPrintMany(selectedRecords, printSequentialRecords)}
-              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">چاپ پشت‌سرهم</button>
-            <button disabled={selected.length === 0 || printing} onClick={() => doPrintMany(selectedRecords, printSummaryReport)}
+          <div className="flex flex-wrap gap-2 items-center">
+            <button disabled={targetRecords.length === 0 || printing} onClick={() => doPrintMany(targetRecords, printSequentialRecords)}
+              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">چاپ پشت‌سرهم ({toPersianDigits(targetRecords.length)})</button>
+            <button disabled={targetRecords.length === 0 || printing}
+              onClick={async () => { setPrinting(true); try { await downloadSequentialPdf(await withVisuals(targetRecords), data.settings, notify); } finally { setPrinting(false); } }}
+              title="همان برگه‌ها در یک فایل PDF واحد برای دانلود"
+              className="px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm disabled:opacity-40">⬇️ دانلود PDF پشت‌سرهم</button>
+            <button disabled={targetRecords.length === 0 || printing} onClick={() => doPrintMany(targetRecords, printSummaryReport)}
               className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">گزارش تجمیعی</button>
-            <button disabled={selected.length === 0} onClick={() => { exportRecordsXlsx(selectedRecords, data.settings, notify); }}
+            <button disabled={ncCount === 0 || printing}
+              onClick={async () => { setPrinting(true); try { await downloadNonconformityPdf(await withVisuals(targetRecords.filter(isNonconformingRecord)), data.settings, rangeLabel, notify); } finally { setPrinting(false); } }}
+              title="برگه‌های ناموفق/حیاتی همین فیلتر، با فهرست آیتم‌های مغایر — خروجی PDF"
+              className="px-3.5 py-2 rounded-xl bg-danger-50 border border-danger-200 text-danger-700 hover:bg-danger-100 text-sm disabled:opacity-40">⚠️ گزارش عدم انطباق‌ها ({toPersianDigits(ncCount)})</button>
+            <button disabled={targetRecords.length === 0} onClick={() => { exportRecordsXlsx(targetRecords, data.settings, notify); }}
               className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">خروجی اکسل</button>
-            <button disabled={selected.length === 0} onClick={() => exportRecordsCsv(selectedRecords)}
+            <button disabled={targetRecords.length === 0} onClick={() => exportRecordsCsv(targetRecords)}
               className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">خروجی CSV</button>
           </div>
         )}
       </div>
+      {canManage && selected.length === 0 && targetRecords.length > 0 && (
+        <p className="text-[11px] text-slate-400 -mt-3">
+          خروجی‌ها روی <b>{toPersianDigits(targetRecords.length)}</b> نتیجه‌ی فیلترشده اعمال می‌شود؛ اگر برگه‌ای را تیک بزنید، فقط همان‌ها گرفته می‌شود.
+        </p>
+      )}
 
       <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -11730,34 +11930,96 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   // برمی‌گردانیم تا مسیر PDF سمت سرور جایگزین شود.
   const html2pdfLib = await ensureLib('html2pdf').catch(e => { console.error('html2pdf در دسترس نیست؛ به مسیر سرور می‌افتیم', e); return null; });
   if (!html2pdfLib) return null;
-  const holder = document.createElement('div');
-  holder.setAttribute('dir', 'rtl');
-  holder.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1;';
-  holder.innerHTML = '<style>' + (styleCss || '') + '</style>' + innerHtml;
-  document.body.appendChild(holder);
+
+  // نشانه‌ی holder برای onclone: در کپیِ رندر، برگه روی صفحه برمی‌گردد
+  // (رفع «PDF کاملاً سفید»: وقتی holder با left منفی بیرون از صفحه بود،
+  // html2canvas به‌خصوص روی موبایل/صفحه‌ی اسکرول‌شده ناحیه‌ی خالی را عکس می‌گرفت.)
+  const buildHolder = () => {
+    const holder = document.createElement('div');
+    holder.setAttribute('data-pdf-holder', '1');
+    holder.setAttribute('dir', 'rtl');
+    holder.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1;';
+    holder.innerHTML = '<style>' + (styleCss || '') + '</style>' + innerHtml;
+    document.body.appendChild(holder);
+    return holder;
+  };
+
+  // رفع باگ «برگه سفید»: در کلونِ html2canvas، holder به جریان عادی سند
+  // برگردانده می‌شود تا ناحیه‌ی درست عکس گرفته شود؛ صفحه‌ی واقعی دست‌نخورده
+  // می‌ماند (کاربر هیچ‌چیز نمی‌بیند).
+  const onclone = (doc) => {
+    try {
+      const el = doc.querySelector('[data-pdf-holder]');
+      if (el) {
+        el.style.position = 'static';
+        el.style.left = '0';
+        el.style.top = '0';
+        el.style.zIndex = 'auto';
+        el.style.margin = '0';
+      }
+      if (doc.body) doc.body.style.margin = '0';
+    } catch (e) { /* بی‌خطر: حتی اگر نشد، تنظیمات scroll کمک می‌کند */ }
+  };
+
+  const tryBuild = async (opt) => {
+    const holder = buildHolder();
+    try {
+      const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
+      const b64 = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+        fr.onerror = () => reject(fr.error);
+        fr.readAsDataURL(blob);
+      });
+      // اعتبارسنجی: خروجی باید واقعاً PDF (%PDF-) و به‌اندازه‌ی کافی بزرگ باشد؛
+      // وگرنه به‌عنوان شکست اعلام می‌شود (نه اینکه فایل سفید دانلود شود).
+      let head = '';
+      try { head = atob(b64.slice(0, 24)).slice(0, 5); } catch (e) { head = ''; }
+      return (b64.length > 200 && head === '%PDF-') ? b64 : null;
+    } catch (e) {
+      console.error('ساخت PDF ناموفق بود', e);
+      return null;
+    } finally {
+      holder.remove();
+    }
+  };
+
+  // تلاش اول: کیفیت کامل. تلاش دوم (fallback): تنظیمات سبک‌تر برای دستگاه‌های
+  // ضعیف/موبایل که با scale=2 خروجی خالی می‌دهند.
+  const b64 = await tryBuild({
+    // حاشیه‌ها دقیقاً مثل @page { margin: 14mm } در REPORT_STYLE — یعنی همان
+    // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
+    margin: [14, 14, 14, 14],
+    image: { type: 'jpeg', quality: 0.96 },
+    html2canvas: { scale: 2, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+    pagebreak: { mode: ['css', 'legacy'] },
+  });
+  if (b64) return b64;
+  return await tryBuild({
+    margin: [14, 14, 14, 14],
+    image: { type: 'jpeg', quality: 0.9 },
+    html2canvas: { scale: 1, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+    pagebreak: { mode: ['css', 'legacy'] },
+  });
+}
+
+/**
+ * دانلود مطمئن PDF از base64: به‌جای data URL (که روی موبایل/فایل‌های بزرگ
+ * خراب می‌شود یا فایل خالی ذخیره می‌کند)، Blob واقعی ساخته و با object URL
+ * دانلود می‌شود. اگر مرورگر Blob را نداشت، به data URL برمی‌گردیم.
+ */
+function downloadBase64Pdf(b64, filename) {
   try {
-    const opt = {
-      // حاشیه‌ها دقیقاً مثل @page { margin: 14mm } در REPORT_STYLE — یعنی همان
-      // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
-      margin: [14, 14, 14, 14],
-      image: { type: 'jpeg', quality: 0.96 },
-      html2canvas: { scale: 2, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-      pagebreak: { mode: ['css', 'legacy'] },
-    };
-    const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
-    const b64 = await new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
-      fr.onerror = () => reject(fr.error);
-      fr.readAsDataURL(blob);
-    });
-    return b64 && b64.length > 200 ? b64 : null;
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([arr], { type: 'application/pdf' }));
+    downloadDataUrl(url, filename);
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 30000);
   } catch (e) {
-    console.error('ساخت PDF سمت کلاینت ناموفق بود؛ به مسیر سرور برمی‌گردیم.', e);
-    return null;
-  } finally {
-    holder.remove();
+    downloadDataUrl('data:application/pdf;base64,' + b64, filename);
   }
 }
 
@@ -11775,7 +12037,7 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify) {
   // لود نشد)، این مرحله بی‌صدا رد می‌شود و فقط مسیر سروری (Drive) اجرا می‌شود.
   if (pdfBase64) {
     try {
-      downloadDataUrl('data:application/pdf;base64,' + pdfBase64, recordPdfFileName(record));
+      downloadBase64Pdf(pdfBase64, recordPdfFileName(record));
     } catch (eDownload) { /* دانلود محلی هرگز نباید ثبت رکورد یا آپلود را بشکند */ }
   }
   const json = await signedCall(url, apiKey, 'save_record', {
@@ -12318,7 +12580,7 @@ function HelpPage() {
         <p>۲. از منوی «اجرای بازرسی» اول چک‌لیست را انتخاب کنید؛ فهرست تجهیزات فقط زیرسیستم‌های همان چک‌لیست را نشان می‌دهد. نام بازرس به‌طور خودکار از حساب کاربری شما خوانده می‌شود و قابل تغییر نیست؛ در پایان، امضای بازرس (در محل) الزامی است و بقیه‌ی امضاها طبق تعداد تعیین‌شده در چک‌لیست از راه زنجیره‌ی امضا گرفته می‌شوند.</p>
         <p>۳. برگه به‌ترتیب به امضاکننده‌های بعدی می‌رسد و در منوی «در انتظار امضا»یشان ظاهر می‌شود. هر گیرنده دو انتخاب دارد: «امضا در محل» یا «ارجاع به دیگری». فقط خودِ گیرنده یا ادمین اجازه‌ی امضا/ارجاع دارد و تا مرحله‌ی قبلی امضا نشود، نوبت نفر بعدی باز نمی‌شود.</p>
         <p>۳٫۱. ورود ماندگار: اگر هنگام ورود تیک «مرا به خاطر بسپار» روشن باشد، دفعه‌ی بعد بدون پرسیدن رمز، مستقیم وارد می‌شوید و تنظیمات اتصال هم روی همین دستگاه ذخیره می‌ماند. دکمه‌ی «خروج» این حالت را پاک می‌کند.</p>
-        <p>۴. در «سوابق»، می‌توانید چاپ تکی، پشت‌سرهم، تجمیعی و خروجی اکسل/CSV بگیرید.</p>
+        <p>۴. در «سوابق»، با فیلتر بازه‌ی تاریخ (شمسی) و دسته‌بندی (برق/ماشین‌آلات/…)، می‌توانید چاپ تکی، چاپ پشت‌سرهم، <b>دانلود PDF پشت‌سرهم</b>، گزارش تجمیعی، <b>گزارش عدم انطباق‌ها</b> و خروجی اکسل/CSV بگیرید. اگر برگه‌ای تیک نزنید، خروجی روی همه‌ی نتایج فیلترشده اعمال می‌شود.</p>
         <p>۵. آیتم‌های «حیاتی» در صورت رد شدن، نتیجه را به‌طور خودکار «ناموفق (حیاتی)» می‌کنند، حتی اگر درصد امتیاز بالا باشد.</p>
         <p>۶. اتصال ابری در «تنظیمات» با روش Apps Script (بدون نیاز به کلود گوگل) یا OAuth مستقیم قابل پیکربندی است. وضعیت همگام‌سازی، صف تغییرات و تعارض‌ها نیز در همان صفحه دیده می‌شود.</p>
         <p>۷. اپ آفلاین هم کار می‌کند: تغییرات در صف محلی نگه داشته می‌شوند و با برقراری اتصال به‌طور خودکار ارسال می‌گردند.</p>
@@ -13307,5 +13569,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c6f9736f990346',t:'MTc4OTYzNjE5MQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c769151e7dd10f',t:'MTc4OTY0MDc2Mw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
