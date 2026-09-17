@@ -5386,11 +5386,29 @@ function DataProvider({ children }) {
     try {
       let guard = 0;
       while (queueRef.current.length && guard++ < 40) {
-        const batch = queueRef.current.slice(0, 60);
+        // ادغام دوقلوها: برای هر (entity,id) فقط آخرین op به این دسته می‌رود؛ چون
+        // هر op وضعیت کامل موجودیت را حمل می‌کند، اعمالِ آخرین همان نتیجه را دارد
+        // و ترافیک سینک تقریباً نصف می‌شود (هر ثبت برگه دو op هم‌ارز می‌ساخت).
+        // دوقلوی قدیمی از صف هم حذف می‌شود تا شمارنده‌ی tries بین دو op تقسیم نشود.
+        const rawBatch = queueRef.current.slice(0, 60);
+        const byKey = new Map();
+        rawBatch.forEach(o => { const k = (o.entity || '') + ':' + String(o.id || ''); const prev = byKey.get(k); if (!prev || (o.seq || 0) >= (prev.seq || 0)) byKey.set(k, o); });
+        const superseded = rawBatch.filter(o => byKey.get((o.entity || '') + ':' + String(o.id || '')) !== o);
+        if (superseded.length) {
+          const supIds = new Set(superseded.map(o => o.opId));
+          queueRef.current = queueRef.current.filter(o => !supIds.has(o.opId));
+          opsRemove(Array.from(supIds));
+        }
+        const batch = Array.from(byKey.values());
         const res = await signedCall(cfg.url, cfg.apiKey, 'db.push', { ops: batch, baseRevision: revisionRef.current, sessionToken: (sessionRef.current && sessionRef.current.sessionToken) || '' });
         const done = new Set();
-        (res.applied || []).forEach(x => { done.add(x.opId); pushed++; });
-        (res.skipped || []).forEach(x => { done.add(x.opId); });
+        const appliedKeys = new Set();
+        (res.applied || []).forEach(x => { done.add(x.opId); pushed++; const op = batch.find(o => o.opId === x.opId); if (op) appliedKeys.add((op.entity || '') + ':' + String(op.id || '')); });
+        (res.skipped || []).forEach(x => { done.add(x.opId); const op = batch.find(o => o.opId === x.opId); if (op) appliedKeys.add((op.entity || '') + ':' + String(op.id || '')); });
+        if (appliedKeys.size) {
+          // دوقلوهای هم‌موجیت که در صف مانده‌اند دیگر لازم نیستند (همان وضعیت اعمال شد)
+          queueRef.current.forEach(o => { const k = (o.entity || '') + ':' + String(o.id || ''); if (appliedKeys.has(k) && !done.has(o.opId)) done.add(o.opId); });
+        }
         (res.conflicts || []).forEach(x => {
           done.add(x.opId);
           // خودِ عملیات ردشده نگه داشته می‌شود تا مسیر بازیابی وجود داشته باشد
@@ -5541,11 +5559,44 @@ function DataProvider({ children }) {
 
   useEffect(() => { if (ready && data) persistData(data); }, [data, ready]);
 
+  /* ---------------- بازارسال PDF برگه‌های بدون فایل درایو ---------------- */
+  // اگر برگه‌ای در حالت آفلاین امضا شده باشد، op داده‌اش با صف می‌رسد ولی فایل
+  // PDF درایوِ آن (که فقط در لحظه‌ی امضا ساخته می‌شد) هرگز نساخته شده است.
+  // این reconcile بعد از برگشت اینترنت یا راه‌اندازی برنامه، برای حداکثر ۸ برگه‌ی
+  // بدون pdfUrl یک ارسال سبک (serverOnly) می‌زند و pdfUrl را روی رکورد می‌نشاند.
+  const pdfReconcileRef = useRef(null);
+  const schedulePdfReconcile = useCallback((delay) => {
+    clearTimeout(pdfReconcileRef.current);
+    pdfReconcileRef.current = setTimeout(async () => {
+      try {
+        const d = dataRef.current; if (!d) return;
+        const cfg = resolveCloudConfig((d.settings || {}));
+        if (!cfg.url || !cfg.apiKey) return;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        const need = (d.records || []).filter(r => r && !r.pdfUrl && r.signatures && r.signatures.inspector && r.signatures.inspector.image).slice(0, 8);
+        if (!need.length) return;
+        let doneN = 0;
+        for (const r of need) {
+          try {
+            const visual = await Promise.resolve(ensureRecordVisuals(r));
+            const json = await sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, d.settings, null, { serverOnly: true });
+            if (json && json.pdfUrl) {
+              doneN++;
+              update(x => { const j = (x.records || []).findIndex(q => q.id === r.id); if (j > -1 && !x.records[j].pdfUrl) x.records[j].pdfUrl = json.pdfUrl; });
+            }
+          } catch (e) { /* بی‌صدا؛ در تلاش بعدی */ }
+        }
+        if (doneN) notify('فایل PDF ' + toPersianDigits(doneN) + ' برگه‌ی بدون فایل، در Google Drive بازسازی شد.', 'success');
+      } catch (e) { /* بی‌خطر */ }
+    }, delay || 5000);
+  }, [notify, update]);
+
   /* ---------------- رویدادهای شبکه و تمرکز پنجره ---------------- */
   useEffect(() => {
     const onOnline = () => {
       setSyncPatch({ online: true });
       if (flushRef.current) flushRef.current('online');
+      schedulePdfReconcile(4000);
     };
     const onOffline = () => setSyncPatch({ online: false, status: 'offline' });
     const onFocus = () => {
@@ -5566,14 +5617,16 @@ function DataProvider({ children }) {
     window.addEventListener('focus', onFocus);
     window.addEventListener('pagehide', onPageHide);
     const interval = setInterval(() => { if (flushRef.current) flushRef.current('interval'); }, 90000);
+    schedulePdfReconcile(12000); // راه‌اندازی: برگه‌های آفلاینِ جلسه‌ی قبل جبران شوند
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('pagehide', onPageHide);
       clearInterval(interval);
+      clearTimeout(pdfReconcileRef.current);
     };
-  }, [setSyncPatch]);
+  }, [setSyncPatch, schedulePdfReconcile]);
 
   useEffect(() => {
     if (!toast) return;
@@ -8094,7 +8147,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626';
+const APP_BUILD = 'B-14050626r2';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -13004,7 +13057,7 @@ function TrendChart({ records, height }) {
    ۲۰. داشبورد
    ============================================================ */
 function DashboardPage({ goPage, goRunner }) {
-  const { data, currentUser, perms } = useAppData();
+  const { data, currentUser, perms, sync } = useAppData();
   const total = data.records.length;
   const success = data.records.filter(r => r.status === 'موفق').length;
   const criticalFails = data.records.filter(r => r.status === 'ناموفق (حیاتی)').length;
@@ -13021,11 +13074,20 @@ function DashboardPage({ goPage, goRunner }) {
     </div>
   );
 
+  const chipCfg = !!(sync && (sync.configured || sync.lastSyncAt || sync.pending));
+  const chipText = !chipCfg ? '' : (sync.status === 'error' ? 'همگام‌سازی ناموفق' : sync.status === 'offline' ? 'آفلاین — تغییرات در صف می‌ماند' : (sync.pending > 0 ? 'در صف ارسال: ' + toPersianDigits(sync.pending) : (sync.lastSyncAt ? 'آخرین همگام‌سازی: ' + toPersianDigits(new Date(sync.lastSyncAt).toLocaleTimeString('fa-IR')) : 'آماده همگام‌سازی')));
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-bold text-slate-800">سلام، {(currentUser && currentUser.name) || ''} 👋</h2>
-        <p className="text-sm text-slate-500">نمای کلی از وضعیت بازرسی‌های تجهیزات</p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">سلام، {(currentUser && currentUser.name) || ''} 👋</h2>
+          <p className="text-sm text-slate-500">نمای کلی از وضعیت بازرسی‌های تجهیزات</p>
+        </div>
+        {chipCfg && (
+          <span className={"text-[11px] px-2.5 py-1 rounded-full border " + (sync.status === 'error' ? 'bg-danger-50 border-danger-200 text-danger-700' : sync.status === 'offline' || sync.pending > 0 ? 'bg-warn-50 border-warn-200 text-warn-800' : 'bg-emerald-50 border-emerald-200 text-emerald-700')}>
+            {sync.status === 'offline' || sync.pending > 0 ? '🔄 ' : '✅ '}{chipText}
+          </span>
+        )}
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {stat('کل بازرسی‌ها', toPersianDigits(total))}
@@ -13670,5 +13732,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ca5d8a3e5ac72b',t:'MTc4OTY3MTc0OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
