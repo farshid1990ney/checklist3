@@ -3943,7 +3943,18 @@ function idbRun(storeName, mode, fn) {
     const store = tx.objectStore(storeName);
     let result;
     try { result = fn(store); } catch (e) { reject(e); return; }
-    tx.oncomplete = () => resolve(result && result.__value !== undefined ? result.__value : result);
+    // رفع باگ: fn همیشه یک Promise (از wrapReq) برمی‌گرداند، پس «result» در لحظه‌ی
+    // اجرای این خط هرگز مقدار نهایی نیست و result.__value همیشه undefined است —
+    // یعنی شرط زیر همیشه شاخه‌ی «else» را می‌گرفت و کل شیء Promise/بسته‌شده
+    // (نه مقدار واقعی‌اش) resolve می‌شد. طبق مشخصات IndexedDB، رویداد success
+    // درخواست همیشه پیش از رویداد complete تراکنش شلیک می‌شود، پس همین‌جا با
+    // then گرفتن از result، مقدار واقعی (و بازشده از {__value:...}) را می‌گیریم.
+    let unwrapped, gotError, errVal;
+    Promise.resolve(result).then(
+      v => { unwrapped = (v && v.__value !== undefined) ? v.__value : v; },
+      e => { gotError = true; errVal = e; }
+    );
+    tx.oncomplete = () => { if (gotError) reject(errVal); else resolve(unwrapped); };
     tx.onerror = () => reject(tx.error || new Error('خطای IndexedDB'));
     tx.onabort = () => reject(tx.error || new Error('عملیات IndexedDB لغو شد'));
   }));
