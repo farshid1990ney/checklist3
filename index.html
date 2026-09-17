@@ -3527,7 +3527,7 @@ const APP_VERSION = 4;
 // توسط کاربر در صفحه‌ی تنظیمات یا در «اتصال اولیه» صفحه ورود وارد شود.
 // سمت سرور هم اگر API_KEY در Script Properties نباشد، همه‌ی درخواست‌ها را رد
 // می‌کند و دیگر «اولین کلید ارسالی» را خودکار ثبت نمی‌کند.
-const DEFAULT_APPS_SCRIPT_URL = ''; // نمونه: 'https://script.google.com/macros/s/AKfycb.../exec'
+const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz9xqFyKsSQiO1ijQac6VvqVp4CYxD0cagZcZTTYpgx7afLAoY5qb6LKW5Cw8uGGj1Wwg/exec'; // آدرس عمومی است و مشکلی ندارد؛ کلید API عمداً اینجا نوشته نمی‌شود
 
 // کلید API موقتاً در sessionStorage هم قابل نگهداری است (حالت «فقط این نشست»)
 const SESSION_API_KEY = 'derkav_cloud_api_key_session';
@@ -3614,6 +3614,41 @@ function makeDefaultAssets() {
 // گزارش شده بود («هر بار App Script و API می‌خواهد»).
 const CLOUD_RESCUE_KEY = 'derkav_cloud_rescue_v1';
 
+// نسخه‌ی پشتیبان دائمی اتصال ابری (آدرس + کلید API) — «derkav_cloud_config_v1»
+// در هر ذخیره‌سازی موفق نوشته می‌شود و هرگز خودکار پاک نمی‌شود؛ بنابراین اگر
+// داده‌ی اصلی (IndexedDB/localStorage) خراب یا ریست شود، اتصال بدون تایپ دوباره
+// بازیابی می‌شود و دیگر پیام «App Script و API هر بار» تکرار نمی‌گردد.
+const CLOUD_CONFIG_BACKUP_KEY = 'derkav_cloud_config_v1';
+
+/** نوشتن پشتیبان اتصال (فقط وقتی حداقل یکی از مقادیر موجود است) */
+function backupConnectionConfig_(data) {
+  try {
+    const s = data && data.settings;
+    if (!s) return;
+    const u = String(s.googleAppsScriptUrl || '').trim();
+    const k = String(s.cloudApiKey || '').trim();
+    if (!u && !k) return;
+    localStorage.setItem(CLOUD_CONFIG_BACKUP_KEY, JSON.stringify({
+      googleAppsScriptUrl: u,
+      cloudApiKey: k,
+      cloudFolderName: String(s.cloudFolderName || ''),
+    }));
+  } catch (e) { /* حافظه در دسترس نیست؛ مشکلی برای ادامه نیست */ }
+}
+
+/** بازیابی اتصال از پشتیبان — فقط فیلدهای خالی را پر می‌کند و پشتیبان را حذف نمی‌کند */
+function restoreConnectionConfig_(settings) {
+  try {
+    if (!settings || typeof settings !== 'object') return settings;
+    const b = JSON.parse(localStorage.getItem(CLOUD_CONFIG_BACKUP_KEY) || 'null');
+    if (!b) return settings;
+    if (!String(settings.googleAppsScriptUrl || '').trim() && b.googleAppsScriptUrl) settings.googleAppsScriptUrl = b.googleAppsScriptUrl;
+    if (!String(settings.cloudApiKey || '').trim() && b.cloudApiKey) settings.cloudApiKey = b.cloudApiKey;
+    if (!String(settings.cloudFolderName || '').trim() && b.cloudFolderName) settings.cloudFolderName = b.cloudFolderName;
+  } catch (e) { /* پشتیبان خراب بود؛ بی‌خیال */ }
+  return settings;
+}
+
 async function makeDefaultData() {
   const adminCred = DEFAULT_ADMIN_CRED;
   const pinCred = DEFAULT_PIN_CRED;
@@ -3658,6 +3693,8 @@ async function makeDefaultData() {
       localStorage.removeItem(CLOUD_RESCUE_KEY);
     }
   } catch (e) { /* اگر چیزی خراب بود، بی‌خیال؛ کاربر می‌تواند دوباره وارد کند */ }
+  // بازیابی از پشتیبان دائمی اتصال (کلید پشتیبان حذف نمی‌شود و می‌ماند)
+  restoreConnectionConfig_(out.settings);
   return out;
 }
 
@@ -3725,9 +3762,11 @@ function persistData(data) {
       // آینه را عمداً حذف می‌کنیم تا نسخه‌ی کهنه‌ی کوچک‌تر جا نماند و روزی
       // به‌عنوان «داده‌ی معتبر» خوانده نشود.
       try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+      backupConnectionConfig_(data);
       return;
     }
 
+    backupConnectionConfig_(data);
     try {
       localStorage.setItem(STORAGE_KEY, json);
     } catch (e) {
@@ -5402,6 +5441,7 @@ function DataProvider({ children }) {
      try {
       let raw = await loadRawData();
       if (raw) raw = migrateData(raw);
+      if (raw && raw.settings) restoreConnectionConfig_(raw.settings);
       if (!raw) {
         // دستگاه کاملاً تازه: فقط در صورتی می‌توانیم bootstrap کنیم که آدرس و کلید
         // از قبل (در فایل یا نشست) در دسترس باشد. کلید هیچ‌وقت در فایل جاسازی نمی‌شود.
@@ -5936,11 +5976,14 @@ function LoginScreen() {
   });
   const [storageLostDismissed, setStorageLostDismissed] = useState(false);
 
-  // اتصال اولیه به پایگاه ابری: چون کلید API هیچ‌وقت داخل فایل جاسازی نمی‌شود
-  // (رفع ایراد ۱-۵)، دستگاه تازه باید یک‌بار آدرس و کلید را وارد کند.
-  const configured = !!(data.settings.googleAppsScriptUrl || '').trim();
+  // اتصال اولیه به پایگاه ابری: آدرس از قبل داخل فایل هست، ولی کلید API هیچ‌وقت
+  // داخل فایل جاسازی نمی‌شود (رفع ایراد ۱-۵). پس «برقرار» یعنی هر دو موجود؛
+  // اگر کلید نبود، پنل با آدرسِ ازپیش‌پرشده باز می‌شود تا کاربر فقط کلید را یک
+  // بار وارد کند.
+  const bootCfg = resolveCloudConfig(data.settings);
+  const configured = !!(bootCfg.url && bootCfg.apiKey);
   const [showCloud, setShowCloud] = useState(!configured);
-  const [url, setUrl] = useState(data.settings.googleAppsScriptUrl || '');
+  const [url, setUrl] = useState(data.settings.googleAppsScriptUrl || DEFAULT_APPS_SCRIPT_URL || '');
   const [key, setKey] = useState(data.settings.cloudApiKey || '');
   const [rememberKey, setRememberKey] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -5996,6 +6039,11 @@ function LoginScreen() {
       // اگر ورود رد شد، ورودی را از نظر دام‌های رایج بررسی کن تا کاربر دلیل
       // واقعی را ببیند (نه فقط «رمز اشتباه است»).
       setHints(diagnoseLoginInput(username, password));
+      // اگر کلید API روی این دستگاه ذخیره نیست، کاربران واقعی سازمان از سرور
+      // دریافت نشده‌اند و فقط کاربر پیش‌فرض محلی وجود دارد — این را صریح بگو.
+      if (err.includes('اشتباه') && !resolveCloudConfig(data.settings).apiKey) {
+        setHints(h => h.concat(['اتصال ابری روی این دستگاه برقرار نیست (کلید API ذخیره نشده است)، بنابراین فهرست کاربران از سرور دریافت نشده. ابتدا از پنل «اتصال به پایگاه ابری» کلید را یک بار وارد کنید تا کاربران سازمان دریافت شوند، بعد وارد شوید.']));
+      }
     } else {
       setHints([]);
       try { localStorage.setItem(LAST_USERNAME_KEY, username.trim()); } catch (e) {}
@@ -11644,7 +11692,7 @@ function SettingsPage() {
   const [threshold, setThreshold] = useState(String(data.settings.passThreshold || 80));
   const [flowMode, setFlowMode] = useState(resolveSignFlowMode(data.settings));
   const [newCategory, setNewCategory] = useState('');
-  const [gasUrl, setGasUrl] = useState(data.settings.googleAppsScriptUrl || '');
+  const [gasUrl, setGasUrl] = useState(data.settings.googleAppsScriptUrl || DEFAULT_APPS_SCRIPT_URL || '');
   const [clientId, setClientId] = useState(data.settings.googleClientId || '');
   const [apiKey, setApiKey] = useState(data.settings.cloudApiKey || '');
   const [rememberKey, setRememberKey] = useState(true);
@@ -11666,7 +11714,7 @@ function SettingsPage() {
     setOrg(data.settings.orgName || '');
     setThreshold(String(data.settings.passThreshold || 80));
     setFlowMode(resolveSignFlowMode(data.settings));
-    setGasUrl(data.settings.googleAppsScriptUrl || '');
+    setGasUrl(data.settings.googleAppsScriptUrl || DEFAULT_APPS_SCRIPT_URL || '');
     setClientId(data.settings.googleClientId || '');
     setApiKey(data.settings.cloudApiKey || '');
     setSyncConn(!!data.settings.syncConnectionSettings);
@@ -13099,5 +13147,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c6a6fa19ec6f69',t:'MTc4OTYzMjgxMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
