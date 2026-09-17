@@ -3896,26 +3896,30 @@ function validateBackupShape(data) {
    هر کتابخانه دو منبع دارد (unpkg و jsdelivr) تا اگر یکی فیلتر/قطعه بود،
    دومی جواب بدهد.
    --------------------------------------------------------------------------- */
+/* ⚠️ «?v=2» عمداً اضافه شده: دستگاه برخی کاربران باندل قدیمیِ این کتابخانه‌ها
+   را کش کرده بود (Producer: jsPDF 2.3.1 به‌جای 2.5.1 در خروجی PDF) و چون URL
+   یکی بود، هرگز به‌روز نمی‌شد → PDF خالی/خراب. تغییر URL کش را باطل می‌کند.
+   اولویت هم به jsdelivr داده شد (پایدارتر برای کاربر ایرانی). */
 const LIB_SOURCES = {
   html2pdf: {
     global: 'html2pdf',
     urls: [
-      'https://unpkg.com/html2pdf.js@0.10.2/dist/html2pdf.bundle.min.js',
-      'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.2/dist/html2pdf.bundle.min.js',
+      'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.2/dist/html2pdf.bundle.min.js?v=2',
+      'https://unpkg.com/html2pdf.js@0.10.2/dist/html2pdf.bundle.min.js?v=2',
     ],
   },
   xlsx: {
     global: 'XLSX',
     urls: [
-      'https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js',
-      'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+      'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js?v=2',
+      'https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js?v=2',
     ],
   },
   html5qrcode: {
     global: 'Html5Qrcode',
     urls: [
-      'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
-      'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js?v=2',
+      'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js?v=2',
     ],
   },
 };
@@ -6284,6 +6288,7 @@ function LoginScreen() {
               ورود کار نمی‌کند؟ پاک‌کردن داده‌ی محلی این مرورگر و شروع تازه
             </button>
           </div>
+          <p className="text-[10px] text-slate-300 text-center select-none" title="نشان نسخه‌ی منتشرشده">نسخه: {APP_BUILD}</p>
         </form>
       </div>
     </div>
@@ -8084,6 +8089,10 @@ const REPORT_STYLE = `
   .photo-grid img { width:120px; height:90px; object-fit:cover; border:1px solid #e2e8f0; border-radius:6px; }
   .photo-ext { width:120px; height:90px; border:1px dashed #cbd5e1; border-radius:6px; font-size:10px; color:#94a3b8; display:flex; align-items:center; justify-content:center; text-align:center; padding:6px; }
 `;
+
+/** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
+   در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
+const APP_BUILD = 'B-14050626';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -12005,7 +12014,9 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
       // وگرنه به‌عنوان شکست اعلام می‌شود (نه اینکه فایل سفید دانلود شود).
       let head = '';
       try { head = atob(b64.slice(0, 24)).slice(0, 5); } catch (e) { head = ''; }
-      return (b64.length > 200 && head === '%PDF-') ? b64 : null;
+      // هر PDF واقعیِ ساخته‌شده از رندر صفحه، یک JPEG تمام‌صفحه درونش دارد
+      // (حداقل ~۱۵KB باینری). خروجی‌های «صفحه‌ی خالی» ~۳KB هستند → رد.
+      return (b64.length > 12000 && head === '%PDF-') ? b64 : null;
     } catch (e) {
       console.error('ساخت PDF ناموفق بود', e);
       return null;
@@ -12055,7 +12066,7 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   if (b64) {
     // اگر محتوا به‌قدر کافی بلند است که باید چندصفحه‌ای شود ولی خروجی تک‌صفحه
     // آمد، یعنی html2canvas بخشی را از دست داده → با مقیاس پایین‌تر دوباره.
-    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 960));
+    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 1016));
     if (expectedPages > 1) {
       const got = pdfPageCount(b64);
       if (got > 0 && got < expectedPages) {
@@ -12378,6 +12389,7 @@ function SettingsPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
+      <p className="text-[10px] text-slate-400 select-none">نسخه: {APP_BUILD}</p>
       {/* ---------------- وضعیت همگام‌سازی ---------------- */}
       <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
         <div className="flex items-center justify-between gap-3">
@@ -13633,5 +13645,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c788dd2d36d10f',t:'MTc4OTY0MjA2NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c79af19ed1d107',t:'MTc4OTY0MjgwNg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
