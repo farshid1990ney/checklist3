@@ -4776,6 +4776,9 @@ function normalizeSignStep(raw, fallbackSlot) {
     signedByUserId: String(raw.signedByUserId || ''),
     signedByUserName: String(raw.signedByUserName || ''),
     referredFrom: referredFrom,
+    // «امضای حضوری»: این مرحله روی دستگاه فرد دیگری (معمولاً بازرس) امضا شده
+    onsite: !!raw.onsite,
+    onsiteCollectorName: String(raw.onsiteCollectorName || ''),
   };
 }
 
@@ -5034,6 +5037,50 @@ function applySignatureToRecord(rec, signature, user, at) {
     steps: steps, status: SIGN_REQUEST_STATUS.PENDING,
   }));
   out.updatedAt = now;
+  return out;
+}
+
+/**
+ * «امضای حضوری در محل»: گیرنده‌ی مرحله‌ی فعال کنار دستگاهِ فرد دیگری (معمولاً
+ * بازرس) ایستاده است و امضایش همان‌جا روی همین دستگاه گرفته می‌شود — بدون
+ * نیاز به ارجاع و بدون این‌که گیرنده حساب/دستگاه جدا داشته باشد.
+ *
+ * امضا به نام **خودِ گیرنده** ثبت می‌شود (signedBy = گیرنده، نه نفرِ پشت
+ * دستگاه)؛ برای شفافیت ممیزی، نشانِ `onsite` و نام دریافت‌کننده‌ی دستگاه روی
+ * هم مرحله و هم امضای ثبت‌شده می‌ماند. ترتیب زنجیره دست‌نخورده می‌ماند چون
+ * فقط مرحله‌ی فعال قابل امضای حضوری است.
+ * ورودی `toUser` = گیرنده‌ی مرحله؛ `collector` = صاحبِ دستگاه (بازرس).
+ */
+function applyOnsiteSignatureToRecord(rec, signature, toUser, collector, at) {
+  if (!rec || !toUser || !toUser.id) return null;
+  const srBefore = normalizeSignRequest(rec.signRequest);
+  const act = activeSignStep(srBefore);
+  if (!act) return null;
+  // فقط مرحله‌ی فعال و فقط با گیرنده‌ی خودِ همان مرحله
+  if (String(act.toUserId) !== String(toUser.id)) return null;
+  const done = applySignatureToRecord(rec, signature, toUser, at);
+  if (!done) return null;
+  const out = Object.assign({}, done);
+  const collectorName = resolveSignerName(collector);
+  // نشان «امضا در محل» روی امضای ثبت‌شده
+  out.signatures = Object.assign({}, out.signatures);
+  if (out.signatures[act.slot]) {
+    out.signatures[act.slot] = Object.assign({}, out.signatures[act.slot], {
+      onsite: true,
+      onsiteCollectorName: collectorName,
+    });
+  }
+  // نشان روی مرحله‌ی همان‌امضاشده (اندیسش = currentِ پیش از پیشرفت زنجیره)
+  const srAfter = normalizeSignRequest(out.signRequest);
+  if (srAfter) {
+    const idx = srBefore.current;
+    const steps2 = srAfter.steps.map((s, i) => (i === idx
+      ? Object.assign({}, s, { onsite: true, onsiteCollectorName: collectorName })
+      : s));
+    out.signRequest = normalizeSignRequest(Object.assign({}, srAfter, {
+      steps: steps2, status: SIGN_REQUEST_STATUS.PENDING,
+    }));
+  }
   return out;
 }
 
@@ -7898,7 +7945,7 @@ function renderSignatureBoxes(rec) {
   const esc = escapeHtml;
   const box = (title, sig, emptyHtml) => {
     const body = (sig && sig.image)
-      ? `<img src="${esc(sig.image)}" /><div class="sig-name">${esc(sig.name)}${sig.title ? ' — ' + esc(sig.title) : ''}</div>`
+      ? `<img src="${esc(sig.image)}" /><div class="sig-name">${esc(sig.name)}${sig.title ? ' — ' + esc(sig.title) : ''}</div>${sig.onsite ? `<div class="sig-onsite">✍️ امضا در محل${sig.onsiteCollectorName ? ' — دریافت توسط: ' + esc(sig.onsiteCollectorName) : ''}</div>` : ''}`
       : emptyHtml;
     return `<div class="sig-box"><div class="sig-title">${esc(title)}</div>${body}</div>`;
   };
@@ -7988,6 +8035,7 @@ const REPORT_STYLE = `
   .sig-title { font-size:11px; color:#64748b; margin-bottom:6px; }
   .sig-box img { height:60px; object-fit:contain; }
   .sig-name { font-size:11px; margin-top:4px; }
+  .sig-onsite { font-size:10px; color:#0369a1; margin-top:3px; }
   .sig-empty { font-size:11px; color:#cbd5e1; padding:20px 0; }
   .photos { margin-top:16px; page-break-inside:avoid; }
   .photos > b { font-size:12px; display:block; margin-bottom:6px; }
@@ -8109,6 +8157,8 @@ function SignChainTrack({ rec, compact }) {
         : (i === p.stepIndex ? 'active' : 'waiting')),
     substitute: s.status === SIGN_REQUEST_STATUS.SIGNED && s.signedByUserId && s.signedByUserId !== s.toUserId,
     referral: s.referredFrom ? (s.referredFrom.userName || '—') : null,
+    onsite: !!s.onsite,
+    onsiteCollector: s.onsiteCollectorName || null,
   })));
 
   const tone = {
@@ -8134,9 +8184,115 @@ function SignChainTrack({ rec, compact }) {
           {n.referral && (
             <div className="mt-0.5 text-[10px] opacity-80">↪ ارجاع از {n.referral}</div>
           )}
+          {n.onsite && (
+            <div className="mt-0.5 text-[10px] opacity-80">✍️ امضا در محل{n.onsiteCollector ? ' — دریافت: ' + n.onsiteCollector : ''}</div>
+          )}
         </div>
       ))}
     </div>
+  );
+}
+
+/* ============================================================
+   ۱۵-ب. مودال «امضای حضوری در محل»
+   ============================================================ */
+/**
+ * بلافاصله پس از ثبت بازرسیِ چندامضایی باز می‌شود و می‌پرسد: گیرنده‌ی مرحله‌ی
+ * بعد (مثلاً راننده/ناظر) الان کنار شماست؟
+ *  - بله → دستگاه را دست او می‌دهند، پد امضا با نام خودش باز می‌شود و مرحله
+ *    همان‌جا بسته می‌شود (applyOnsiteSignatureToRecord) — بدون ارجاع.
+ *  - نه → هیچ کاری انجام نمی‌شود؛ برگه طبق روال عادی به صف «در انتظار امضا»ی
+ *    او می‌رود (یا با دکمه‌ی ارجاع به فرد دیگری).
+ * ترتیب زنجیره حفظ می‌شود: هر بار فقط گیرنده‌ی مرحله‌ی فعال پرسیده می‌شود.
+ */
+function OnSiteSignModal({ rec, onClose }) {
+  const { data, update, currentUser, notify, ensureRecordVisuals } = useAppData();
+  const [padOpen, setPadOpen] = useState(false);
+  if (!rec) return null;
+  // همیشه از داده‌ی زنده بخوان؛ ممکن است در همین فاصله برگه عوض شده باشد
+  const live = (data.records || []).find(r => r.id === rec.id) || rec;
+  const sr = normalizeSignRequest(live.signRequest);
+  const step = activeSignStep(sr);
+  if (!step) return null; // زنجیره در فاصله‌ی کوتاه امضا/لغو شده → چیزی نپرس
+  const toUser = (data.users || []).find(u => String(u.id) === String(step.toUserId));
+  const toName = (toUser && resolveSignerName(toUser)) || step.toUserName || '—';
+  const stepNo = sr.current + 2; // +۱ امضای بازرس، +۱ برای شماره‌ی انسانی
+
+  const doOnsite = (sig) => {
+    let ok = false, nextRec = null, nextStep = null;
+    update(d => {
+      const i = d.records.findIndex(r => r.id === rec.id);
+      if (i < 0) return;
+      const act = activeSignStep(normalizeSignRequest(d.records[i].signRequest));
+      // بازبینی مجوز در لحظه‌ی نوشتن: ممکن است در فاصله‌ی باز شدن پد، مرحله در
+      // دستگاه دیگری امضا/لغو/ارجاع شده باشد.
+      if (!act || String(act.toUserId) !== String(step.toUserId)) return;
+      const u = (d.users || []).find(x => String(x.id) === String(act.toUserId));
+      if (!u) return;
+      const next = applyOnsiteSignatureToRecord(d.records[i], sig, u, currentUser);
+      if (next) { d.records[i] = next; ok = true; nextRec = next; nextStep = activeSignStep(next.signRequest); }
+    });
+    if (!ok) { notify('امضای حضوری ثبت نشد؛ وضعیت برگه تغییر کرده است.', 'error'); onClose(); return; }
+    notify(nextStep
+      ? 'امضای حضوری «' + toName + '» ثبت شد. مرحله‌ی بعد: «' + (nextStep.toUserName || '—') + '».'
+      : 'امضای حضوری «' + toName + '» ثبت شد و زنجیره‌ی امضا کامل شد.', 'success');
+    // «PDF درایو = آخرین وضعیت برگه»: مثل امضای عادی، PDF تازه جایگزین می‌شود.
+    try {
+      const cfg = resolveCloudConfig(data.settings);
+      if (cfg.url && cfg.apiKey && nextRec) {
+        Promise.resolve(ensureRecordVisuals(nextRec))
+          .then(visual => sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, data.settings, null))
+          .then(json => {
+            if (json && json.pdfUrl) {
+              update(d => {
+                const j = d.records.findIndex(r => r.id === rec.id);
+                if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
+              });
+            }
+          })
+          .catch(() => { /* شکست آپلود PDF هرگز امضا را برنمی‌گرداند */ });
+      }
+    } catch (e) { /* بی‌خطر */ }
+    onClose();
+  };
+
+  return (
+    <React.Fragment>
+      <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center bg-slate-900/50 p-3 no-print" onClick={onClose}>
+        <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl p-5 space-y-3" onClick={e => e.stopPropagation()}>
+          <div className="flex items-start gap-2.5">
+            <span className="text-2xl leading-none">✍️</span>
+            <div className="flex-1 min-w-0">
+              <h3 className="font-bold text-slate-800 text-sm">امضای حضوری در محل — مرحله {toPersianDigits(stepNo)}</h3>
+              <p className="text-xs text-slate-500 mt-1 leading-6">
+                آیا <b className="text-slate-700">{toName}</b> ({signSlotLabel(step.slot)}) اکنون کنار شماست؟
+              </p>
+            </div>
+          </div>
+          <div className="bg-brand-50 border border-brand-200 rounded-xl p-3 text-xs text-brand-900 leading-6">
+            <b>حاضره؟</b> دکمه‌ی زیر را بزنید و دستگاه را دست او بدهید تا امضایش را همین‌جا بکشد؛
+            امضا به نام خودش ثبت می‌شود و این مرحله بسته می‌شود.
+            <br /><b>نیست؟</b> هیچ کاری لازم نیست — برگه خودکار به صف «در انتظار امضا»ی او می‌رود
+            تا از دستگاه خودش امضا کند (یا از همین صفحه با «ارجاع» به فرد دیگری سپرده شود).
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2 pt-1">
+            <button onClick={() => setPadOpen(true)}
+              className="flex-1 bg-brand-600 hover:bg-brand-700 text-white rounded-xl py-2.5 text-sm font-medium">
+              ✍️ بله، حاضره — امضایش را همین‌جا می‌گیرم
+            </button>
+            <button onClick={onClose}
+              className="px-4 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 text-sm">
+              نه، بعداً در صف خودش امضا می‌کند
+            </button>
+          </div>
+        </div>
+      </div>
+      <SignaturePad open={padOpen} onClose={() => setPadOpen(false)}
+        roleLabel={'امضای حضوری — ' + signSlotLabel(step.slot) + ' (مرحله ' + toPersianDigits(stepNo) + ')'}
+        initialName={toName}
+        lockName
+        onSave={doOnsite} />
+    </React.Fragment>
   );
 }
 
@@ -12897,6 +13053,9 @@ function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showPwModal, setShowPwModal] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  // «امضای حضوری در محل»: رکورد چندامضایی که تازه ثبت شده و می‌خواهیم بپرسیم
+  // گیرنده‌ی مرحله‌ی بعد الان در محل حاضر است یا نه.
+  const [onsiteRec, setOnsiteRec] = useState(null);
 
   const myPages = useMemo(() => (perms && perms.pages) || effectivePages(currentUser), [perms, currentUser]);
 
@@ -12947,7 +13106,7 @@ function AppShell() {
 
   let content;
   if (page === 'dashboard') content = <DashboardPage goPage={goPage} goRunner={goRunner} />;
-  else if (page === 'runner') content = <RunnerPage assetId={runnerAssetId} assignmentId={runnerAssignmentId} onFinish={() => goPage('records')} />;
+  else if (page === 'runner') content = <RunnerPage assetId={runnerAssetId} assignmentId={runnerAssignmentId} onFinish={(rec) => { if (rec && rec.signRequest) setOnsiteRec(rec); goPage('records'); }} />;
   else if (page === 'coverage') content = <CoveragePage goRunner={goRunner} />;
   else if (page === 'correctives') content = <CorrectivesPage goRecord={goRecord} />;
   else if (page === 'assets') content = <AssetsPage goRunner={goRunner} />;
@@ -13023,6 +13182,7 @@ function AppShell() {
       </div>
 
       <ChangePasswordModal open={showPwModal} onClose={() => setShowPwModal(false)} />
+      <OnSiteSignModal rec={onsiteRec} onClose={() => setOnsiteRec(null)} />
     </div>
   );
 }
@@ -13147,5 +13307,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c6a6fa19ec6f69',t:'MTc4OTYzMjgxMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c6f9736f990346',t:'MTc4OTYzNjE5MQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
