@@ -7823,7 +7823,9 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
     // شکست آن هرگز باعث از دست رفتن سابقه نمی‌شود.
     const cfg = resolveCloudConfig(data.settings);
     if (cfg.url && cfg.apiKey) {
-      sendRecordToAppsScript(cfg.url, cfg.apiKey, record, data.settings, notify)
+      // رفع کندی: بعد از ثبت، PDF با موتور سرور ساخته می‌شود نه روی گوشی؛
+      // پیام موفقیت هم بعد از رسیدن پاسخ درایو می‌آید.
+      sendRecordToAppsScript(cfg.url, cfg.apiKey, record, data.settings, notify, { serverOnly: true })
         .then(json => {
           if (json && json.pdfUrl) {
             update(d => {
@@ -8410,21 +8412,24 @@ function OnSiteSignModal({ rec, onClose }) {
     notify(nextStep
       ? 'امضای حضوری «' + toName + '» ثبت شد. مرحله‌ی بعد: «' + (nextStep.toUserName || '—') + '».'
       : 'امضای حضوری «' + toName + '» ثبت شد و زنجیره‌ی امضا کامل شد.', 'success');
-    // «PDF درایو = آخرین وضعیت برگه»: مثل امضای عادی، PDF تازه جایگزین می‌شود.
+    // «PDF درایو = آخرین وضعیت برگه»: مثل امضای عادی — سبک و بدون رندر روی
+    // گوشی (serverOnly) + حذف دوباره‌کاری چند امضای پشت‌هم.
     try {
       const cfg = resolveCloudConfig(data.settings);
       if (cfg.url && cfg.apiKey && nextRec) {
-        Promise.resolve(ensureRecordVisuals(nextRec))
-          .then(visual => sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, data.settings, null))
-          .then(json => {
-            if (json && json.pdfUrl) {
-              update(d => {
-                const j = d.records.findIndex(r => r.id === rec.id);
-                if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-              });
-            }
-          })
-          .catch(() => { /* شکست آپلود PDF هرگز امضا را برنمی‌گرداند */ });
+        scheduleRecordPdfSync('pdf:' + rec.id, () => {
+          Promise.resolve(ensureRecordVisuals(nextRec))
+            .then(visual => sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, data.settings, null, { serverOnly: true }))
+            .then(json => {
+              if (json && json.pdfUrl) {
+                update(d => {
+                  const j = d.records.findIndex(r => r.id === rec.id);
+                  if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
+                });
+              }
+            })
+            .catch(() => { /* شکست آپلود PDF هرگز امضا را برنمی‌گرداند */ });
+        });
       }
     } catch (e) { /* بی‌خطر */ }
     onClose();
@@ -8535,24 +8540,28 @@ function SignQueuePage({ goRecord }) {
       : 'امضای شما ثبت شد و زنجیره‌ی امضا کامل گردید.', 'success');
 
     // «PDF درایو = آخرین وضعیت برگه»: با هر امضا، همان برگه‌ی تازه (با امضای
-    // جدید) دوباره رندر و در درایو جایگزین می‌شود تا فایلی که آن‌جا است با
-    // آنچه کاربر در برنامه می‌بیند یکی باشد. شکست آپلود هرگز امضا را برنمی‌گرداند.
+    // جدید) در درایو جایگزین می‌شود. رفع کندی: PDF روی گوشی ساخته نمی‌شود
+    // (serverOnly) و اگر چند امضای پشت‌هم ثبت شود فقط آخرین وضعیت ارسال
+    // می‌شود — پس همگام‌سازی بعد از امضا سریع تمام می‌شود. شکست آپلود هرگز
+    // امضای ثبت‌شده را تحت‌تأثیر نمی‌گذارد.
     const cfg = resolveCloudConfig(data.settings);
     if (cfg.url && cfg.apiKey) {
       const current = data.records.find(r => r.id === target.id);
       const signedNow = current ? (applySignatureToRecord(current, sig, currentUser) || current) : null;
       if (signedNow) {
-        Promise.resolve(ensureRecordVisuals(signedNow))
-          .then(visual => sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, data.settings, null))
-          .then(json => {
-            if (json && json.pdfUrl) {
-              update(d => {
-                const j = d.records.findIndex(r => r.id === target.id);
-                if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-              });
-            }
-          })
-          .catch(() => { /* آپلود نشدن PDF نباید امضای ثبت‌شده را تحت‌تأثیر بگذارد */ });
+        scheduleRecordPdfSync('pdf:' + target.id, () => {
+          Promise.resolve(ensureRecordVisuals(signedNow))
+            .then(visual => sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, data.settings, null, { serverOnly: true }))
+            .then(json => {
+              if (json && json.pdfUrl) {
+                update(d => {
+                  const j = d.records.findIndex(r => r.id === target.id);
+                  if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
+                });
+              }
+            })
+            .catch(() => { /* آپلود نشدن PDF نباید امضای ثبت‌شده را تحت‌تأثیر بگذارد */ });
+        });
       }
     }
   };
@@ -12097,19 +12106,33 @@ function downloadBase64Pdf(b64, filename) {
   }
 }
 
-async function sendRecordToAppsScript(url, apiKey, record, org, notify) {
+/* حذف دوباره‌کاری بازسازی PDF: اگر چند امضا پشت‌هم برای یک برگه ثبت شود
+   (مثلاً راننده و مدیر هر دو در محل)، به‌جای چند ارسال همزمان، فقط آخرین
+   وضعیت بعد از ۲.۵ ثانیه سکوت ارسال می‌شود → سرعت همگام‌سازی و صرفه‌جویی
+   در اینترنت موبایل. */
+const recordPdfTimers = {};
+function scheduleRecordPdfSync(key, fn, delay) {
+  try { clearTimeout(recordPdfTimers[key]); } catch (e) {}
+  recordPdfTimers[key] = setTimeout(() => { try { fn(); } catch (e) { console.error('PDF sync ناموفق', e); } }, delay || 2500);
+}
+
+async function sendRecordToAppsScript(url, apiKey, record, org, notify, opts) {
   // «یک رندر، سه خروجی»: همین رشته‌ی HTML هم در پنجره‌ی چاپ نمایش داده می‌شود،
-  // هم مبنای ساخت PDF دانلود محلی است و هم (به‌صورت بایت‌های همان PDF) در
-  // گوگل‌درایو ذخیره می‌شود. چون فقط یک‌بار ساخته می‌شود، فایل درایو دقیقاً
-  // همان برگه‌ای است که کاربر در برنامه دیده است.
+  // هم مبنای ساخت PDF دانلود محلی است و هم در گوگل‌درایو ذخیره می‌شود.
+  //
+  // ⚠️ رفع باگ TDZ: «serverStyle» قبلاً قبل از اعلان «pdfBase64» به آن ارجاع
+  // می‌داد → ReferenceError → کل ارسال PDF (محلی و درایو) کرش می‌کرد.
+  //
+  // حالت serverOnly (برای لحظه‌ی امضا): PDF اصلاً روی گوشی ساخته نمی‌شود؛
+  // HTML مستقیم به Apps Script می‌رود و موتور گوگل PDF را می‌سازد. نتیجه:
+  //   ✓ بعد از امضا، گوشی دیگر درگیر لود کتابخانه‌ی ۲MB و رندر بوم نیست
+  //     → همگام‌سازی سریع‌تر تمام می‌شود
+  //   ✓ PDF درایو با متن واقعی (نه عکس) و چیدمان بلوکیِ کامل ساخته می‌شود
+  const serverOnly = !!(opts && opts.serverOnly);
   const bodyHtml = recordReportHtml(record, org);
+  const pdfBase64 = serverOnly ? null : await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   const serverStyle = pdfBase64 ? '' : SERVER_FALLBACK_STYLE;
   const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}${serverStyle}</style></head><body>${bodyHtml}</body></html>`;
-  const pdfBase64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
-  // دانلود محلی: مستقل از موفقیت ذخیره در Drive انجام می‌شود، چون کاربر
-  // معمولاً می‌خواهد بلافاصله یک نسخه‌ی محلی داشته باشد، حتی اگر اتصال ابری
-  // کند/قطع باشد. اگر ساخت PDF سمت کلاینت ناموفق بود (مثلاً کتابخانه آفلاین
-  // لود نشد)، این مرحله بی‌صدا رد می‌شود و فقط مسیر سروری (Drive) اجرا می‌شود.
   if (pdfBase64) {
     try {
       downloadBase64Pdf(pdfBase64, recordPdfFileName(record));
@@ -12129,9 +12152,11 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify) {
     html: pdfBase64 ? '' : html,
   }, cloudFolderName(org));
   if (notify) {
-    notify(pdfBase64
-      ? 'فایل PDF دقیقاً مثل برگه‌ی نمایش‌داده‌شده، دانلود و در Google Drive ذخیره شد.'
-      : 'سابقه در Google Drive ذخیره شد (کتابخانه‌ی PDF در دسترس نبود؛ نسخه‌ی ذخیره‌شده با موتور سمت سرور رندر شده است).',
+    notify(serverOnly
+      ? 'PDF برگه در Google Drive بازسازی شد (موتور سرور — بدون بار روی گوشی).'
+      : (pdfBase64
+        ? 'فایل PDF دقیقاً مثل برگه‌ی نمایش‌داده‌شده، دانلود و در Google Drive ذخیره شد.'
+        : 'سابقه در Google Drive ذخیره شد (نسخه‌ی ذخیره‌شده با موتور سمت سرور رندر شده است).'),
       'success');
   }
   return json;
@@ -13645,5 +13670,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c79af19ed1d107',t:'MTc4OTY0MjgwNg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
