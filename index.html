@@ -5483,7 +5483,7 @@ function DataProvider({ children }) {
   flushRef.current = flush;
 
   /* ---------------- به‌روزرسانی داده + تولید عملیات ---------------- */
-  const update = useCallback((fn) => {
+  const update = useCallback((fn, opts) => {
     const prev = dataRef.current;
     if (!prev) return;
     let next = prev, patches = null;
@@ -5499,6 +5499,17 @@ function DataProvider({ children }) {
     if (next === prev) return;
     dataRef.current = next;
     setData(next);
+    // رفع ایراد «STALE_WRITE درست بعد از امضا»: بعضی به‌روزرسانی‌های محلی
+    // (مثل چسباندن pdfUrl بعد از برگشتنِ save_record) صرفاً بازتاب همان چیزی‌اند
+    // که خودِ سرور همان لحظه، از یک مسیر جداگانه، روی همان ردیف نوشته است.
+    // اگر این‌ها هم مثل یک ویرایش واقعیِ کاربر با ساعتِ کلاینت به‌صورت op
+    // push شوند، ممکن است به‌خاطر چند ثانیه اختلاف ساعتِ گوشی/سرور «قدیمی‌تر»
+    // از چیزی به‌نظر برسند که خودِ همان سرور تازه نوشته و با STALE_WRITE رد
+    // شوند — دقیقاً همان چیزی که به کاربر به‌صورت «۱ تغییر محلی اعمال نشد»
+    // بلافاصله بعد از امضا نشان داده می‌شد. opts.silent فقط state محلی را
+    // عوض می‌کند؛ هیچ opای تولید/صف‌بندی نمی‌شود (چون منبعِ حقیقتِ سرور از
+    // مسیر دیگری همین حالا به‌روز شده است).
+    if (opts && opts.silent) return;
     const touched = patches ? collectTouchedCollections(patches) : null;
     const ops = diffState(prev, next, touched, !!(next.settings || {}).syncConnectionSettings);
     if (ops.length) enqueueOps(ops);
@@ -5582,7 +5593,7 @@ function DataProvider({ children }) {
             const json = await sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, d.settings, null, { serverOnly: true });
             if (json && json.pdfUrl) {
               doneN++;
-              update(x => { const j = (x.records || []).findIndex(q => q.id === r.id); if (j > -1 && !x.records[j].pdfUrl) x.records[j].pdfUrl = json.pdfUrl; });
+              update(x => { const j = (x.records || []).findIndex(q => q.id === r.id); if (j > -1 && !x.records[j].pdfUrl) x.records[j].pdfUrl = json.pdfUrl; }, { silent: true });
             }
           } catch (e) { /* بی‌صدا؛ در تلاش بعدی */ }
         }
@@ -7884,7 +7895,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
             update(d => {
               const i = d.records.findIndex(r => r.id === record.id);
               if (i > -1) d.records[i].pdfUrl = json.pdfUrl;
-            });
+            }, { silent: true });
           }
         })
         .catch(e => notify('سابقه ثبت شد، اما ساخت PDF در درایو ناموفق بود: ' + e.message, 'error'));
@@ -8478,7 +8489,7 @@ function OnSiteSignModal({ rec, onClose }) {
                 update(d => {
                   const j = d.records.findIndex(r => r.id === rec.id);
                   if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-                });
+                }, { silent: true });
               }
             })
             .catch(() => { /* شکست آپلود PDF هرگز امضا را برنمی‌گرداند */ });
@@ -8610,7 +8621,7 @@ function SignQueuePage({ goRecord }) {
                 update(d => {
                   const j = d.records.findIndex(r => r.id === target.id);
                   if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-                });
+                }, { silent: true });
               }
             })
             .catch(() => { /* آپلود نشدن PDF نباید امضای ثبت‌شده را تحت‌تأثیر بگذارد */ });
@@ -9595,6 +9606,11 @@ const APPS_SCRIPT_CODE = `/**
  *      ۵۰٬۰۰۰ کاراکتر ظرفیت دارد).
  *   ۷. endpoint مهاجرت از نسخه قدیمی (JSON) به Sheets.
  *
+ *   ۸. رفع ایراد «STALE_WRITE درست بعد از امضا» (نسخه ۸.۱): مسیر قدیمیِ
+ *      save_record (برای بازسازی PDF بعد از هر امضا) دیگر مهرِ زمانیِ LWW
+ *      رکورد را با ساعت خودِ سرور جلو نمی‌برد. جزئیات در یادداشتِ بالای
+ *      handleSaveRecord و upsertEntity.
+ *
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -9626,7 +9642,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.0";
+var SERVER_VERSION = "8.1";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 120;
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -10301,6 +10317,29 @@ function upsertEntity(ss, entityName, incoming, options) {
     var existing = {};
     header.forEach(function (col, i) { existing[col] = deserializeCell(col, existingRow[i]); });
     var srvUpdated = toMs(existing.updatedAt);
+
+    /* پچ متادیتای «کنارگذر» (رفع ایراد ۸-STALE: نمونه‌اش چسباندن pdfUrl به
+       رکورد بعد از بازسازی PDF در handleSaveRecord). این نوشتن نماینده‌ی
+       یک ویرایش واقعیِ کاربر نیست، فقط یک فیلد نمایشی/جانبی را به‌روز
+       می‌کند. پیش‌تر چنین نوشتنی هم مثل بقیه updatedAt را با incUpdated
+       (که می‌توانست ساعت خودِ سرور باشد، نه ساعت کلاینت) جلو می‌برد؛ نتیجه
+       این بود که اولین op بعدیِ همان رکورد که با ساعت کلاینت push می‌شد،
+       در مقایسه با این «جهشِ پنهان» قدیمی‌تر به‌نظر می‌رسید و با
+       SERVER_NEWER رد می‌شد — دقیقاً همان چیزی که به‌صورت «۱ تغییر محلی
+       اعمال نشد» بلافاصله بعد از امضا دیده می‌شد. با preserveUpdatedAt این
+       پچ هرگز رد نمی‌شود (چون اصلاً وارد مقایسه‌ی LWW نمی‌شود) و هرگز مبنای
+       LWW را هم جابه‌جا نمی‌کند؛ فقط syncedAt جلو می‌رود تا بقیه‌ی
+       دستگاه‌ها هم فیلد تازه را در delta pull بعدی ببینند. */
+    if (opts.preserveUpdatedAt) {
+      var patched = existing;
+      header.forEach(function (col) {
+        if (incoming[col] !== undefined && col !== "updatedAt" && col !== "createdAt") patched[col] = incoming[col];
+      });
+      patched.syncedAt = nowMs();
+      writeRow_(ss, entityName, patched, rowIndex);
+      return { applied: true, reason: "PATCHED_NO_CLOCK", row: rowIndex, updatedAt: srvUpdated };
+    }
+
     if (!opts.force && srvUpdated > incUpdated) {
       return { applied: false, reason: "SERVER_NEWER", serverUpdatedAt: srvUpdated, row: rowIndex };
     }
@@ -11555,7 +11594,14 @@ function handleSaveRecord(ss, rootName, data) {
       criticalFail: toBool(rec.criticalFail), status: rec.status || "",
       pdfUrl: mainFile.getUrl(), updatedAt: nowMs()
     };
-    upsertEntity(ss, "records", savedRec, {});
+    // رفع ایراد «STALE_WRITE درست بعد از امضا»: این نوشتن فقط برای چسباندن
+    // pdfUrl (و چند فیلد نمایشی) بعد از بازسازی PDF است، نه یک ویرایش واقعیِ
+    // کاربر. قبلاً updatedAt اینجا با nowMs() (ساعت خودِ سرور) جلو می‌رفت؛ چون
+    // این مسیر (save_record) کاملاً مستقل از صف عملیاتِ db.push است، همین
+    // «جهشِ پنهانِ ساعت» باعث می‌شد اولین ویرایش بعدیِ همان رکورد — که با ساعت
+    // کلاینت push می‌شود و می‌تواند چند ثانیه از ساعت سرور عقب‌تر باشد — رد شود
+    // (پیام «۱ تغییر محلی اعمال نشد چون نسخه‌ی جدیدتری روی سرور بود»).
+    upsertEntity(ss, "records", savedRec, { force: true, preserveUpdatedAt: true });
     bumpRevision(ss);
   } catch (eRec) { savedRec = null; }
 
