@@ -5732,10 +5732,13 @@ function DataProvider({ children }) {
   const ensureRecordVisuals = useCallback(async (rec) => {
     if (!rec || !rec.signatures) return rec;
     const copy = Object.assign({}, rec, { signatures: Object.assign({}, rec.signatures) });
-    for (const role of Object.keys(copy.signatures)) {
-      const img = await resolveSignature(rec, role);
-      if (img) copy.signatures[role] = Object.assign({}, copy.signatures[role], { image: img });
-    }
+    // رفع کندی چاپ: امضاها **موازی** و با سقف زمانی ۴ ثانیه برای هر تصویر از
+    // ابر گرفته می‌شوند. قبلاً هر امضا پشت‌سرهم و بدون سقف منتظر Apps Script
+    // (سرمای ۲ تا ۵ ثانیه‌ای) می‌ماند → دکمه‌ی چاپ چند ثانیه بی‌واکنش بود.
+    const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+    const roles = Object.keys(copy.signatures);
+    const imgs = await Promise.all(roles.map(role => withTimeout(resolveSignature(rec, role), 4000)));
+    roles.forEach((role, i) => { const img = imgs[i]; if (img) copy.signatures[role] = Object.assign({}, copy.signatures[role], { image: img }); });
     return copy;
   }, [resolveSignature]);
 
@@ -8083,6 +8086,24 @@ const REPORT_STYLE = `
 `;
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
+
+/**
+ * استایل جایگزین فقط برای مسیر پشتیبانِ سرور (وقتی PDF سمت مرورگر ساخته نشد و
+ * HTML برای موتور گوگل فرستاده می‌شود): موتور HTML→PDF گوگل flexbox/grid را
+ * نمی‌فهمد و اگر همان استایل اصلی برود، هدر/کادر امضاها/عکس‌ها ناقص رندر
+ * می‌شوند. این override چیدمان‌های flex را به بلوک ساده تبدیل می‌کند تا
+ * خروجی سرور هم کامل و خوانا باشد.
+ */
+const SERVER_FALLBACK_STYLE = `
+  .hdr{display:block!important}
+  .hdr .logo{display:block;margin-bottom:6px}
+  .summary{display:block!important;margin-bottom:10px}
+  .summary div{display:block;margin-bottom:4px}
+  .sigs{display:block!important}
+  .sig-box{display:block!important;margin-bottom:10px;width:100%}
+  .photo-grid{display:block!important}
+  .photo-grid img{display:block;margin-bottom:6px}
+`;
 
 // رفع ایراد ۲-۴ و ۴-۳: اگر پنجره باز نشد، کاربر پیام روشن دریافت می‌کند
 function openReportWindow(bodyHtml, title, notify) {
@@ -11964,6 +11985,15 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   const tryBuild = async (opt) => {
     const holder = buildHolder();
     try {
+      // آماده‌سازی کامل رندر پیش از عکس‌گرفتن: فونت‌های وب باید لود شده باشند
+      // و تصاویر (امضاها/عکس‌ها) decode شده باشند — وگرنه html2canvas ناحیه‌ی
+      // خالی می‌گیرد (دلیل دیگری برای «PDF سفید/ناقص»).
+      try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+      try {
+        const imgs = holder.querySelectorAll('img');
+        await Promise.all([...imgs].map(im => (im.decode ? im.decode().catch(() => {}) : Promise.resolve())));
+      } catch (e) {}
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
       const b64 = await new Promise((resolve, reject) => {
         const fr = new FileReader();
@@ -11985,24 +12015,57 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   };
 
   // تلاش اول: کیفیت کامل. تلاش دوم (fallback): تنظیمات سبک‌تر برای دستگاه‌های
-  // ضعیف/موبایل که با scale=2 خروجی خالی می‌دهند.
-  const b64 = await tryBuild({
+  // ضعیف/موبایل که با scale بزرگ خروجی خالی می‌دهند.
+  // مقیاس تطبیقی: روی آیفون/iOS سقف اندازه‌ی canvas حدود ۱۶ مگاپیکسل است؛
+  // برگه‌ی بلند (چند برگه پشت‌سرهم/عکس‌دار) با scale=2 از این سقف رد می‌شود و
+  // html2canvas به‌جای خطا، بخشی خالی تحویل می‌دهد. مقیاس را طوری انتخاب
+  // می‌کنیم که کل بوم زیر بودجه‌ی امن بماند (کامل بودن مقدم بر وضوح است).
+  const measureH = () => {
+    const h0 = buildHolder();
+    const hh = Math.max(1, h0.scrollHeight || 0);
+    h0.remove();
+    return hh;
+  };
+  const CONTENT_H = measureH();
+  const PIXEL_BUDGET = 13000000; // زیر سقف iOS با حاشیه‌ی امن
+  const fitScale = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(CONTENT_H, 600)))));
+  const s1 = Math.min(2, Math.round(fitScale * 100) / 100);
+  const s2 = Math.max(0.6, Math.round(fitScale * 0.7 * 100) / 100);
+
+  /** تعداد صفحه‌های PDF (برای کشف «برگه‌ی بلند ولی فقط ۱ صفحه» = خروجی ناقص) */
+  const pdfPageCount = (b64) => {
+    try {
+      const bin = atob(b64);
+      const m = bin.match(/\/Type\s*\/Page[^s]/g);
+      return m ? m.length : 0;
+    } catch (e) { return 0; }
+  };
+
+  const optFor = (sc) => ({
     // حاشیه‌ها دقیقاً مثل @page { margin: 14mm } در REPORT_STYLE — یعنی همان
     // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
     margin: [14, 14, 14, 14],
-    image: { type: 'jpeg', quality: 0.96 },
-    html2canvas: { scale: 2, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
+    image: { type: 'jpeg', quality: sc >= 1.5 ? 0.96 : 0.9 },
+    html2canvas: { scale: sc, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'] },
   });
-  if (b64) return b64;
-  return await tryBuild({
-    margin: [14, 14, 14, 14],
-    image: { type: 'jpeg', quality: 0.9 },
-    html2canvas: { scale: 1, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
-    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-    pagebreak: { mode: ['css', 'legacy'] },
-  });
+
+  const b64 = await tryBuild(optFor(s1));
+  if (b64) {
+    // اگر محتوا به‌قدر کافی بلند است که باید چندصفحه‌ای شود ولی خروجی تک‌صفحه
+    // آمد، یعنی html2canvas بخشی را از دست داده → با مقیاس پایین‌تر دوباره.
+    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 960));
+    if (expectedPages > 1) {
+      const got = pdfPageCount(b64);
+      if (got > 0 && got < expectedPages) {
+        const b64b = await tryBuild(optFor(s2));
+        if (b64b) return b64b;
+      }
+    }
+    return b64;
+  }
+  return await tryBuild(optFor(s2));
 }
 
 /**
@@ -12029,7 +12092,8 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify) {
   // گوگل‌درایو ذخیره می‌شود. چون فقط یک‌بار ساخته می‌شود، فایل درایو دقیقاً
   // همان برگه‌ای است که کاربر در برنامه دیده است.
   const bodyHtml = recordReportHtml(record, org);
-  const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}</style></head><body>${bodyHtml}</body></html>`;
+  const serverStyle = pdfBase64 ? '' : SERVER_FALLBACK_STYLE;
+  const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}${serverStyle}</style></head><body>${bodyHtml}</body></html>`;
   const pdfBase64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   // دانلود محلی: مستقل از موفقیت ذخیره در Drive انجام می‌شود، چون کاربر
   // معمولاً می‌خواهد بلافاصله یک نسخه‌ی محلی داشته باشد، حتی اگر اتصال ابری
@@ -13569,5 +13633,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c769151e7dd10f',t:'MTc4OTY0MDc2Mw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3c788dd2d36d10f',t:'MTc4OTY0MjA2NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
