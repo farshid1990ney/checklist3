@@ -8171,7 +8171,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r5';
+const APP_BUILD = 'B-14050626r4';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -8189,14 +8189,8 @@ const SERVER_FALLBACK_STYLE = `
   .summary div{display:block;margin-bottom:4px}
   .sigs{display:block!important}
   .sig-box{display:block!important;margin-bottom:10px;width:100%}
-  /* رفع ایراد «امضا در PDF نمی‌افتد»: موتور HTML→PDF گوگل، object-fit را
-     نمی‌شناسد؛ بدون عرض/ارتفاع صریح، تصویر امضا با ابعاد طبیعی (اغلب خیلی
-     بزرگ‌تر از canvas نمایش‌داده‌شده) رندر می‌شود و یا بیرون از کادر/صفحه
-     می‌افتد یا اصلاً دیده نمی‌شود. اینجا هم عرض و هم ارتفاع را صریح ثابت
-     می‌کنیم تا مستقل از ابعاد اصلی canvas، همیشه داخل کادر جا شود. */
-  .sig-box img{display:block!important;width:140px!important;height:60px!important;max-width:140px!important;margin:0 auto 6px!important;object-fit:contain}
   .photo-grid{display:block!important}
-  .photo-grid img{display:block;margin-bottom:6px;width:120px!important;height:90px!important;max-width:120px!important;object-fit:cover}
+  .photo-grid img{display:block;margin-bottom:6px}
 `;
 
 // رفع ایراد ۲-۴ و ۴-۳: اگر پنجره باز نشد، کاربر پیام روشن دریافت می‌کند
@@ -8463,6 +8457,19 @@ function SignChainTrack({ rec, compact }) {
  *  - نه → هیچ کاری انجام نمی‌شود؛ برگه طبق روال عادی به صف «در انتظار امضا»ی
  *    او می‌رود (یا با دکمه‌ی ارجاع به فرد دیگری).
  * ترتیب زنجیره حفظ می‌شود: هر بار فقط گیرنده‌ی مرحله‌ی فعال پرسیده می‌شود.
+ *
+ * ⚠️ زنجیره‌ای/cascading (رفع محدودیت «فقط یک مرحله»): قبلاً بعد از هر امضای
+ * حضوریِ موفق، مودال بی‌قیدوشرط بسته می‌شد (onClose) — حتی اگر نفرِ مرحله‌ی
+ * بعدی هم همان لحظه کنارِ دستگاه ایستاده باشد (مثلاً بعد از امضای مرحله‌ی ۲
+ * توسط ناظر، امضاکننده‌ی مرحله‌ی ۳ هم همان‌جا حاضر است). نتیجه این بود که
+ * کاربر برای مرحله‌ی بعد باید می‌رفت صفحه‌ی «در انتظار امضا» را پیدا می‌کرد،
+ * در حالی که می‌شد همان‌جا ادامه داد.
+ * حالا `doOnsite` فقط وقتی onClose را صدا می‌زند که یا امضا شکست بخورد، یا
+ * دیگر مرحله‌ی فعالی نمانده باشد (زنجیره کامل شده). در غیر این صورت فقط پد
+ * امضا بسته می‌شود (`padOpen=false`) و چون `step`/`toName`/`stepNo` همه از
+ * `live` (رکورد تازه از data.records) در بدنه‌ی تابع دوباره محاسبه می‌شوند،
+ * رندر بعدی خودکار همان سؤال «آیا X کنارتان است؟» را برای مرحله‌ی جدید
+ * نشان می‌دهد — بدون این‌که کامپوننت را دوباره باز کنیم.
  */
 function OnSiteSignModal({ rec, onClose }) {
   const { data, update, currentUser, notify, ensureRecordVisuals } = useAppData();
@@ -8492,8 +8499,10 @@ function OnSiteSignModal({ rec, onClose }) {
       if (next) { d.records[i] = next; ok = true; nextRec = next; nextStep = activeSignStep(next.signRequest); }
     });
     if (!ok) { notify('امضای حضوری ثبت نشد؛ وضعیت برگه تغییر کرده است.', 'error'); onClose(); return; }
+    // اگر مرحله‌ی بعدی هنوز باقی مانده، به‌جای بستنِ مودال، همان سؤال
+    // «آیا کنارتان است؟» برای نفرِ مرحله‌ی بعد دوباره پرسیده می‌شود (زنجیره‌ای).
     notify(nextStep
-      ? 'امضای حضوری «' + toName + '» ثبت شد. مرحله‌ی بعد: «' + (nextStep.toUserName || '—') + '».'
+      ? 'امضای حضوری «' + toName + '» ثبت شد. اگر «' + (nextStep.toUserName || 'نفر بعدی') + '» هم کنارتان است، همین‌جا ادامه دهید.'
       : 'امضای حضوری «' + toName + '» ثبت شد و زنجیره‌ی امضا کامل شد.', 'success');
     // «PDF درایو = آخرین وضعیت برگه»: مثل امضای عادی — سبک و بدون رندر روی
     // گوشی (serverOnly) + حذف دوباره‌کاری چند امضای پشت‌هم.
@@ -8515,7 +8524,11 @@ function OnSiteSignModal({ rec, onClose }) {
         });
       }
     } catch (e) { /* بی‌خطر */ }
-    onClose();
+    // زنجیره‌ای: فقط وقتی دیگر مرحله‌ی فعالی نمانده مودال کاملاً بسته می‌شود.
+    // در غیر این صورت فقط پد امضا بسته می‌شود؛ چون `step`/`toName`/`stepNo`
+    // در بدنه‌ی تابع از `live` (رکورد تازه) محاسبه می‌شوند، رندر بعدی خودکار
+    // سؤال «آیا کنارتان است؟» را برای مرحله‌ی جدید نشان می‌دهد.
+    if (nextStep) setPadOpen(false); else onClose();
   };
 
   return (
@@ -9603,7 +9616,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.2
+ *  نسخه: 8.0
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -11632,10 +11645,13 @@ function handleSaveRecord(ss, rootName, data) {
   try {
     savedRec = {
       id: String(rec.id || ("rec-" + nowMs())),
-      // (رفع ناسازگاری کلاینت/سرور) مقدار نهایی نام تجهیز زیر «assetName» است؛
-      // rec.assetTitle فقط ورودی محلی کلاینت است و ممکن است در بدنه نباشد.
-      // قبلاً فقط assetTitle خوانده می‌شد و هر save_record، assetName درستِ
-      // روی شیت را با رشته‌ی خالی پاک می‌کرد (merge با preserveUpdatedAt).
+      // (رفع ناسازگاری کلاینت/سرور) کلاینت مقدار نهایی نام تجهیز را زیر کلید
+      // «assetName» می‌فرستد (نه «assetTitle» — آن فقط یک ورودی محلیِ کلاینت
+      // برای محاسبه‌ی همین مقدار بود و در بدنه‌ی درخواست وجود ندارد). قبلاً
+      // اینجا فقط rec.assetTitle خوانده می‌شد که همیشه undefined بود، پس هر
+      // بار save_record اجرا می‌شد (یعنی بعد از هر امضا)، assetName درستِ
+      // موجود روی شیت با رشته‌ی خالی پاک می‌شد (چون این نوشتن merge با
+      // preserveUpdatedAt است و هر کلیدِ «تعریف‌شده» را overwrite می‌کند).
       assetCode: rec.assetCode || "", assetName: rec.assetTitle || rec.assetName || "",
       templateName: rec.templateTitle || rec.templateName || "", category: rec.category || "",
       location: rec.location || "", inspectorName: rec.inspector || rec.inspectorName || "",
@@ -11649,8 +11665,10 @@ function handleSaveRecord(ss, rootName, data) {
       // می‌آید، کهنه‌تر تلقی و به‌اشتباه SERVER_NEWER رد می‌شد.
       updatedAt: toMs(rec.completedAt || rec.startedAt) || nowMs()
     };
-    // (رفع ایراد مشابه assetName) بدنه‌ی save_record همیشه startedAt ندارد؛
-    // اگر "" بی‌شرط ست شود، merge هر بار startedAt واقعی را پاک می‌کند.
+    // (رفع ایراد مشابه assetName) بدنه‌ی save_record اصلاً فیلد startedAt
+    // ندارد؛ اگر همیشه به‌صورت "" در savedRec گذاشته می‌شد، همان مکانیزم
+    // merge بالا هر بار startedAt واقعیِ ثبت‌شده را با رشته‌ی خالی پاک
+    // می‌کرد. فقط وقتی کلاینت واقعاً مقداری فرستاده باشد ست می‌شود.
     if (rec.startedAt) savedRec.startedAt = rec.startedAt;
     // رفع ایراد «STALE_WRITE درست بعد از امضا»: این نوشتن فقط برای چسباندن
     // pdfUrl (و چند فیلد نمایشی) بعد از بازسازی PDF است، نه یک ویرایش واقعیِ
@@ -13836,5 +13854,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
