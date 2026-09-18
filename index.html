@@ -4164,6 +4164,9 @@ function normalizeEntity(coll, row) {
   }
   if (coll === 'records') {
     if (r.details !== undefined && r.details !== null && !Array.isArray(r.details)) r.details = [];
+    // سرور فقط dateJalali را نگه می‌دارد؛ اکثر نمایش‌های برنامه فیلد date را
+    // می‌خواهند — بدون این، سوابق رسیده از دستگاه دیگر «تاریخ خالی» داشتند.
+    if (!r.date && r.dateJalali) r.date = r.dateJalali;
     // ستون signRequest در شیت از نوع JSON است و وقتی خالی باشد null می‌آید؛
     // null را حذف می‌کنیم تا sameEntity آن را «تغییر» حساب نکند.
     if (r.signRequest === null || r.signRequest === undefined) delete r.signRequest;
@@ -4256,7 +4259,7 @@ function mergeSettings(local, remote, includeConnection) {
   if (r.managerPinHash && !s.managerPinHash) {
     s.managerPinHash = r.managerPinHash;
     s.managerPinSalt = r.managerPinSalt || '';
-    s.managerPinHashAlgo = r.managerPinHashAlgo || '';
+    s.managerPinHashAlgo = r.managerPinHashAlgo || r.managerPinAlgo || '';
     s.managerPinIterations = Number(r.managerPinIterations) || 0;
   }
   if (includeConnection) {
@@ -5382,6 +5385,7 @@ function DataProvider({ children }) {
     setSyncPatch({ status: 'syncing', online: true });
     const newConflicts = [];
     let pushed = 0;
+    let autoRetried = 0;
     let sawSessionError = false;
     try {
       let guard = 0;
@@ -5401,18 +5405,38 @@ function DataProvider({ children }) {
         }
         const batch = Array.from(byKey.values());
         const res = await signedCall(cfg.url, cfg.apiKey, 'db.push', { ops: batch, baseRevision: revisionRef.current, sessionToken: (sessionRef.current && sessionRef.current.sessionToken) || '' });
-        const done = new Set();
-        const appliedKeys = new Set();
-        (res.applied || []).forEach(x => { done.add(x.opId); pushed++; const op = batch.find(o => o.opId === x.opId); if (op) appliedKeys.add((op.entity || '') + ':' + String(op.id || '')); });
-        (res.skipped || []).forEach(x => { done.add(x.opId); const op = batch.find(o => o.opId === x.opId); if (op) appliedKeys.add((op.entity || '') + ':' + String(op.id || '')); });
-        if (appliedKeys.size) {
-          // دوقلوهای هم‌موجیت که در صف مانده‌اند دیگر لازم نیستند (همان وضعیت اعمال شد)
-          queueRef.current.forEach(o => { const k = (o.entity || '') + ':' + String(o.id || ''); if (appliedKeys.has(k) && !done.has(o.opId)) done.add(o.opId); });
+        // محافظ شفافیت: اگر سرور ok داد ولی هیچ‌یک از آرایه‌های نتیجه را برنگرداند
+        // (مثلاً Code.gs قدیمی است و اکشن db.push را نمی‌شناسد)، صف بی‌صدا گیر
+        // نمی‌کند — خطا صریح اعلام و نمایش می‌شود.
+        if (batch.length && !Array.isArray(res.applied) && !Array.isArray(res.skipped) && !Array.isArray(res.conflicts) && !Array.isArray(res.errors)) {
+          setSync(s => Object.assign({}, s, { status: 'error', lastError: 'پاسخ ناقص سرور برای db.push — احتمالاً اسکریپت گوگل (Code.gs) قدیمی است و باید به‌روز شود.' }));
+          notify('همگام‌سازی انجام نشد: اسکریپت سمت گوگل پاسخ کامل نداد (احتمالاً قدیمی است).', 'error');
+          break;
         }
+        const done = new Set();
+        (res.applied || []).forEach(x => { done.add(x.opId); pushed++; });
+        (res.skipped || []).forEach(x => { done.add(x.opId); });
         (res.conflicts || []).forEach(x => {
           done.add(x.opId);
           // خودِ عملیات ردشده نگه داشته می‌شود تا مسیر بازیابی وجود داشته باشد
           const srcOp = batch.find(o => o.opId === x.opId) || null;
+          // «امضا نباید منتظر بازیابی دستی بماند»: برای داده‌های عملیاتی (رکوردها و…)
+          // آخرین وضعیت برنده است — همان op با شناسه‌ی تازه و baseRevision تازه
+          // حداکثر ۲ بار خودکار دوباره ارسال می‌شود. فقط تنظیمات و کاربران (حساس
+          // به دسترسی) به مسیر دستی می‌روند. اگر باز تعارض خورد، دستی می‌ماند.
+          const ar = (srcOp && srcOp.autoRetries) || 0;
+          if (srcOp && ar < 2 && srcOp.entity !== 'settings' && srcOp.entity !== 'users') {
+            const retry = Object.assign({}, srcOp, { opId: uid('op'), at: Date.now(), tries: 0, seq: ++opSeq, autoRetries: ar + 1 });
+            // مهر تازه: تلاش مجدد باید برنده‌ی LWW باشد حتی اگر ساعت این دستگاه
+            // از دستگاه رقیب عقب باشد — ریشه‌ی تعارض‌های تکراری بین چند دستگاه.
+            if (retry.kind !== 'delete' && retry.data && typeof retry.data === 'object') {
+              retry.data = Object.assign({}, retry.data, { updatedAt: Date.now() });
+            }
+            queueRef.current = queueRef.current.concat([retry]);
+            opsAdd([retry]);
+            autoRetried++;
+            return;
+          }
           newConflicts.push({
             kind: 'stale_write', entity: x.entity, id: x.id, at: Date.now(),
             serverUpdatedAt: x.serverUpdatedAt || null,
@@ -5483,7 +5507,7 @@ function DataProvider({ children }) {
   flushRef.current = flush;
 
   /* ---------------- به‌روزرسانی داده + تولید عملیات ---------------- */
-  const update = useCallback((fn, opts) => {
+  const update = useCallback((fn) => {
     const prev = dataRef.current;
     if (!prev) return;
     let next = prev, patches = null;
@@ -5499,17 +5523,6 @@ function DataProvider({ children }) {
     if (next === prev) return;
     dataRef.current = next;
     setData(next);
-    // رفع ایراد «STALE_WRITE درست بعد از امضا»: بعضی به‌روزرسانی‌های محلی
-    // (مثل چسباندن pdfUrl بعد از برگشتنِ save_record) صرفاً بازتاب همان چیزی‌اند
-    // که خودِ سرور همان لحظه، از یک مسیر جداگانه، روی همان ردیف نوشته است.
-    // اگر این‌ها هم مثل یک ویرایش واقعیِ کاربر با ساعتِ کلاینت به‌صورت op
-    // push شوند، ممکن است به‌خاطر چند ثانیه اختلاف ساعتِ گوشی/سرور «قدیمی‌تر»
-    // از چیزی به‌نظر برسند که خودِ همان سرور تازه نوشته و با STALE_WRITE رد
-    // شوند — دقیقاً همان چیزی که به کاربر به‌صورت «۱ تغییر محلی اعمال نشد»
-    // بلافاصله بعد از امضا نشان داده می‌شد. opts.silent فقط state محلی را
-    // عوض می‌کند؛ هیچ opای تولید/صف‌بندی نمی‌شود (چون منبعِ حقیقتِ سرور از
-    // مسیر دیگری همین حالا به‌روز شده است).
-    if (opts && opts.silent) return;
     const touched = patches ? collectTouchedCollections(patches) : null;
     const ops = diffState(prev, next, touched, !!(next.settings || {}).syncConnectionSettings);
     if (ops.length) enqueueOps(ops);
@@ -5593,7 +5606,7 @@ function DataProvider({ children }) {
             const json = await sendRecordToAppsScript(cfg.url, cfg.apiKey, visual, d.settings, null, { serverOnly: true });
             if (json && json.pdfUrl) {
               doneN++;
-              update(x => { const j = (x.records || []).findIndex(q => q.id === r.id); if (j > -1 && !x.records[j].pdfUrl) x.records[j].pdfUrl = json.pdfUrl; }, { silent: true });
+              update(x => { const j = (x.records || []).findIndex(q => q.id === r.id); if (j > -1 && !x.records[j].pdfUrl) x.records[j].pdfUrl = json.pdfUrl; });
             }
           } catch (e) { /* بی‌صدا؛ در تلاش بعدی */ }
         }
@@ -7895,7 +7908,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
             update(d => {
               const i = d.records.findIndex(r => r.id === record.id);
               if (i > -1) d.records[i].pdfUrl = json.pdfUrl;
-            }, { silent: true });
+            });
           }
         })
         .catch(e => notify('سابقه ثبت شد، اما ساخت PDF در درایو ناموفق بود: ' + e.message, 'error'));
@@ -8158,7 +8171,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r2';
+const APP_BUILD = 'B-14050626r5';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -8489,7 +8502,7 @@ function OnSiteSignModal({ rec, onClose }) {
                 update(d => {
                   const j = d.records.findIndex(r => r.id === rec.id);
                   if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-                }, { silent: true });
+                });
               }
             })
             .catch(() => { /* شکست آپلود PDF هرگز امضا را برنمی‌گرداند */ });
@@ -8621,7 +8634,7 @@ function SignQueuePage({ goRecord }) {
                 update(d => {
                   const j = d.records.findIndex(r => r.id === target.id);
                   if (j > -1) d.records[j].pdfUrl = json.pdfUrl;
-                }, { silent: true });
+                });
               }
             })
             .catch(() => { /* آپلود نشدن PDF نباید امضای ثبت‌شده را تحت‌تأثیر بگذارد */ });
@@ -9584,7 +9597,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.0
+ *  نسخه: 8.2
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -9611,6 +9624,19 @@ const APPS_SCRIPT_CODE = `/**
  *      رکورد را با ساعت خودِ سرور جلو نمی‌برد. جزئیات در یادداشتِ بالای
  *      handleSaveRecord و upsertEntity.
  *
+ *   ۹. سازگاری کامل با کلاینت r4 (نسخه ۸.۲):
+ *      الف) settings.set/db.push دیگر «signFlowMode» (تک‌امضا/زنجیره‌ای) و
+ *          «managerPinHashAlgo» (نام کلاینتِ الگوریتم پین) را نمی‌اندازد
+ *          وسط — پیش‌تر هر دو بی‌صدا حذف می‌شدند و تنظیمات بین دستگاه‌ها
+ *          یکدست نمی‌شد (پین مدیر روی دستگاه دوم کار نمی‌کرد).
+ *      ب) db.pull هر دو نام «managerPinAlgo» و «managerPinHashAlgo» را
+ *          برمی‌گرداند تا کلاینت‌های قدیمی و جدید هر دو بفهمند.
+ *      ج) وقتی save_record ردیف رکورد را «برای اولین بار» می‌سازد (PDF زودتر
+ *          از op داده رسیده باشد)، مهر updatedAt از زمانِ خودِ بازرسی
+ *          (completedAt/startedAt کلاینت) گرفته می‌شود نه ساعت سرور — وگرنه
+ *          op بعدیِ کلاینت با ساعت دستگاه، کهنه‌تر تلقی و رد می‌شد.
+ *      د) سقف نرخ پیش‌فرض به ۲۴۰ در دقیقه رفت (چند دستگاه هم‌زمان یک سبد
+ *          مشترک دارند).
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -9642,9 +9668,9 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.1";
+var SERVER_VERSION = "8.2";
 var LOCK_WAIT_MS = 25000;
-var DEFAULT_RATE_LIMIT = 120;
+var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
 var MAX_OPS_PER_REQUEST = 400;
 var MAX_OPS_LOG_ROWS = 5000;
@@ -10462,13 +10488,18 @@ function bumpRevision(ss) {
 
 function getSettings(ss) {
   var s = safeJsonParse(metaGet(ss, "settings", "{}"), {});
+  // «managerPinHashAlgo» نامی است که کلاینت می‌شناسد؛ هر دو نام برمی‌گردد تا
+  // کلاینت‌های قدیمی و جدید هر دو الگوریتم پین را بفهمند (رفع ناسازگاری ۸.۲-الف/ب).
+  var pinAlgo = s.managerPinAlgo || s.managerPinHashAlgo || "";
   return {
     orgName: s.orgName || "",
     passThreshold: toNum(s.passThreshold === undefined ? 80 : s.passThreshold),
+    signFlowMode: s.signFlowMode === "single" ? "single" : "chain",
     logoFileId: s.logoFileId || "",
     managerPinHash: s.managerPinHash || "",
     managerPinSalt: s.managerPinSalt || "",
-    managerPinAlgo: s.managerPinAlgo || "",
+    managerPinAlgo: pinAlgo,
+    managerPinHashAlgo: pinAlgo,
     managerPinIterations: toNum(s.managerPinIterations || 0),
     categories: s.categories || null
   };
@@ -11363,8 +11394,17 @@ function handleSettingsSet(ss, body) {
  */
 function applySettingsSet_(ss, patch, rootBody) {
   var out = {};
-  ["orgName", "passThreshold", "managerPinHash", "managerPinSalt", "managerPinAlgo", "managerPinIterations"]
+  // «managerPinHashAlgo» (نام کلاینت) و «signFlowMode» هم پذیرفته می‌شوند —
+  // پیش‌تر این دو بی‌صدا می‌افتادند و تنظیمات بین دستگاه‌ها یکدست نمی‌شد (۸.۲-الف).
+  ["orgName", "passThreshold", "signFlowMode", "managerPinHash", "managerPinSalt", "managerPinAlgo", "managerPinHashAlgo", "managerPinIterations"]
     .forEach(function (k) { if (patch[k] !== undefined) out[k] = patch[k]; });
+  if (out.managerPinHashAlgo !== undefined) {
+    if (!out.managerPinAlgo) out.managerPinAlgo = out.managerPinHashAlgo;
+    delete out.managerPinHashAlgo; // نام ذخیره‌شده روی سرور همین یکی است
+  }
+  if (out.signFlowMode !== undefined && out.signFlowMode !== "single" && out.signFlowMode !== "chain") {
+    delete out.signFlowMode;
+  }
 
   // لوگو: اگر data URL بزرگ باشد، به‌صورت فایل در Drive نگه داشته می‌شود
   if (patch.logoDataUrl !== undefined) {
@@ -11586,14 +11626,26 @@ function handleSaveRecord(ss, rootName, data) {
   try {
     savedRec = {
       id: String(rec.id || ("rec-" + nowMs())),
-      assetCode: rec.assetCode || "", assetName: rec.assetTitle || "",
+      // (رفع ناسازگاری کلاینت/سرور) مقدار نهایی نام تجهیز زیر «assetName» است؛
+      // rec.assetTitle فقط ورودی محلی کلاینت است و ممکن است در بدنه نباشد.
+      // قبلاً فقط assetTitle خوانده می‌شد و هر save_record، assetName درستِ
+      // روی شیت را با رشته‌ی خالی پاک می‌کرد (merge با preserveUpdatedAt).
+      assetCode: rec.assetCode || "", assetName: rec.assetTitle || rec.assetName || "",
       templateName: rec.templateTitle || rec.templateName || "", category: rec.category || "",
       location: rec.location || "", inspectorName: rec.inspector || rec.inspectorName || "",
-      dateJalali: toJalaliDate(d), startedAt: rec.startedAt || "", completedAt: rec.completedAt || d.toISOString(),
+      dateJalali: toJalaliDate(d), completedAt: rec.completedAt || d.toISOString(),
       percent: toNum(rec.percent), score: toNum(rec.score), maxScore: toNum(rec.maxScore),
       criticalFail: toBool(rec.criticalFail), status: rec.status || "",
-      pdfUrl: mainFile.getUrl(), updatedAt: nowMs()
+      pdfUrl: mainFile.getUrl(),
+      // (رفع ناسازگاری ۸.۲-ج) اگر این ردیف «برای اولین بار» همین‌جا ساخته شود
+      // (PDF زودتر از op داده رسیده باشد)، مهر LWW باید از زمانِ خودِ بازرسی
+      // گرفته شود نه ساعت سرور؛ وگرنه op بعدیِ کلاینت که با ساعت دستگاه
+      // می‌آید، کهنه‌تر تلقی و به‌اشتباه SERVER_NEWER رد می‌شد.
+      updatedAt: toMs(rec.completedAt || rec.startedAt) || nowMs()
     };
+    // (رفع ایراد مشابه assetName) بدنه‌ی save_record همیشه startedAt ندارد؛
+    // اگر "" بی‌شرط ست شود، merge هر بار startedAt واقعی را پاک می‌کند.
+    if (rec.startedAt) savedRec.startedAt = rec.startedAt;
     // رفع ایراد «STALE_WRITE درست بعد از امضا»: این نوشتن فقط برای چسباندن
     // pdfUrl (و چند فیلد نمایشی) بعد از بازسازی PDF است، نه یک ویرایش واقعیِ
     // کاربر. قبلاً updatedAt اینجا با nowMs() (ساعت خودِ سرور) جلو می‌رفت؛ چون
@@ -11609,7 +11661,7 @@ function handleSaveRecord(ss, rootName, data) {
   try { sheetUrl = recordToSpreadsheet(ss); } catch (eSheet) {}
 
   try {
-    if (toBool(rec.criticalFail) || String(rec.status) === "ناموفق (حیاتی)") notifyCriticalFailure(rec, mainFile.getUrl());
+    if (toBool(rec.criticalFail) || String(rec.status) === "ناموفق حیاتی" || String(rec.status) === "ناموفق (حیاتی)") notifyCriticalFailure(rec, mainFile.getUrl());
   } catch (eMail) {}
 
   return {
@@ -13778,5 +13830,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ca5d8a3e5ac72b',t:'MTc4OTY3MTc0OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
