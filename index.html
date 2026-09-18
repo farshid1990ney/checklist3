@@ -8189,8 +8189,14 @@ const SERVER_FALLBACK_STYLE = `
   .summary div{display:block;margin-bottom:4px}
   .sigs{display:block!important}
   .sig-box{display:block!important;margin-bottom:10px;width:100%}
+  /* رفع ایراد «امضا در PDF نمی‌افتد»: موتور HTML→PDF گوگل، object-fit را
+     نمی‌شناسد؛ بدون عرض/ارتفاع صریح، تصویر امضا با ابعاد طبیعی (اغلب خیلی
+     بزرگ‌تر از canvas نمایش‌داده‌شده) رندر می‌شود و یا بیرون از کادر/صفحه
+     می‌افتد یا اصلاً دیده نمی‌شود. اینجا هم عرض و هم ارتفاع را صریح ثابت
+     می‌کنیم تا مستقل از ابعاد اصلی canvas، همیشه داخل کادر جا شود. */
+  .sig-box img{display:block!important;width:140px!important;height:60px!important;max-width:140px!important;margin:0 auto 6px!important;object-fit:contain}
   .photo-grid{display:block!important}
-  .photo-grid img{display:block;margin-bottom:6px}
+  .photo-grid img{display:block;margin-bottom:6px;width:120px!important;height:90px!important;max-width:120px!important;object-fit:cover}
 `;
 
 // رفع ایراد ۲-۴ و ۴-۳: اگر پنجره باز نشد، کاربر پیام روشن دریافت می‌کند
