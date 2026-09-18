@@ -4786,6 +4786,9 @@ function normalizeSignStep(raw, fallbackSlot) {
     // «امضای حضوری»: این مرحله روی دستگاه فرد دیگری (معمولاً بازرس) امضا شده
     onsite: !!raw.onsite,
     onsiteCollectorName: String(raw.onsiteCollectorName || ''),
+    // «ارجاعی از ابتدا»: هنگام ساخت زنجیره تعیین شده که این مرحله حضوری
+    // پرسیده نشود — مستقیم به صف «در انتظار امضا»ی گیرنده برود.
+    skipOnsitePrompt: !!raw.skipOnsitePrompt,
   };
 }
 
@@ -4881,6 +4884,7 @@ function makeSignChain({ steps, byUser, at }) {
       signedAt: 0,
       signedByUserId: '',
       signedByUserName: '',
+      skipOnsitePrompt: !!(s && s.skipOnsitePrompt),
     });
   });
   if (!built.length) return null;
@@ -5408,9 +5412,19 @@ function DataProvider({ children }) {
         // محافظ شفافیت: اگر سرور ok داد ولی هیچ‌یک از آرایه‌های نتیجه را برنگرداند
         // (مثلاً Code.gs قدیمی است و اکشن db.push را نمی‌شناسد)، صف بی‌صدا گیر
         // نمی‌کند — خطا صریح اعلام و نمایش می‌شود.
+        //
+        // چرا نسخه را نشان می‌دهیم: پیامِ قبلی فقط می‌گفت «احتمالاً قدیمی است» و
+        // کاربر راهی برای تأییدش نداشت. حالا نسخه‌ی واقعیِ سرور (که doPost روی
+        // هر پاسخ می‌گذارد) در برابر نسخه‌ی لازم سنجیده می‌شود و راه‌حل دقیق هم
+        // نوشته می‌شود. نکته‌ی مهم: «New version» در دیپلویمنت الزامی است —
+        // ویرایش کد به‌تنهایی، خروجیِ آدرس /exec را عوض نمی‌کند.
         if (batch.length && !Array.isArray(res.applied) && !Array.isArray(res.skipped) && !Array.isArray(res.conflicts) && !Array.isArray(res.errors)) {
-          setSync(s => Object.assign({}, s, { status: 'error', lastError: 'پاسخ ناقص سرور برای db.push — احتمالاً اسکریپت گوگل (Code.gs) قدیمی است و باید به‌روز شود.' }));
-          notify('همگام‌سازی انجام نشد: اسکریپت سمت گوگل پاسخ کامل نداد (احتمالاً قدیمی است).', 'error');
+          setSync(s => Object.assign({}, s, {
+            status: 'error',
+            lastError: 'پاسخ ناقص سرور برای db.push — ' + serverVersionHint(res && res.version) + '. ' + SERVER_UPDATE_HOWTO,
+          }));
+          notify('همگام‌سازی انجام نشد: اسکریپت سمت گوگل پاسخ کامل نداد. ' + serverVersionHint(res && res.version)
+            + ' — کد سرور را از «تنظیمات» کپی و با نسخه‌ی جدید (New version) دوباره دیپلوی کنید.', 'error');
           break;
         }
         const done = new Set();
@@ -7241,7 +7255,7 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="تعداد امضاکنندگان این چک‌لیست"
-          hint="همین اول مشخص می‌شود چند نفر باید برگه را امضا کنند؛ موقع امضا، هر نفر «امضا در محل» می‌زند یا به دیگری «ارجاع» می‌دهد.">
+          hint="همین اول مشخص می‌شود چند نفر باید برگه را امضا کنند؛ موقع اجرای بازرسی، برای هر مرحله «حضوری» (پد امضا همان‌جا باز می‌شود) یا «ارجاعی» انتخاب می‌شود.">
           <select className={inputCls} value={Number(t.signers) || (isSignChainMode(settings) ? 3 : 1)}
             onChange={e => setT({ ...t, signers: Number(e.target.value) })}>
             <option value={1}>۱ امضا — فقط بازرس / اجراکننده (در محل)</option>
@@ -7529,7 +7543,8 @@ function ChecklistItemInput({ item, value, onChange }) {
  * می‌شود چون اصلاً حالت معتبری نیست.
  */
 function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChange,
-                           slot, required, stepNo, exclude }) {
+                           slot, required, stepNo, exclude, mode, onModeChange,
+                           onsiteSig, onCaptureOnsite, onClearOnsite }) {
   const theSlot = SIGN_SLOTS[slot] ? slot : 'approver';
   const label = signSlotLabel(theSlot);
   const excludeIds = exclude || [];
@@ -7539,11 +7554,19 @@ function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChan
   );
   const selected = candidates.find(u => u.id === value)
     || (users || []).find(u => u.id === value);
+  // نام امضا همیشه از حساب کاربری گیرنده خوانده می‌شود (نه چیزی که روی پد تایپ
+  // شود)؛ همان مقداری که پد امضا قفلش می‌کند.
+  const onsiteName = selected ? resolveSignerName(selected) : '';
 
   const filled = !!value;
   const tone = required
     ? (filled ? 'border-ok-300 bg-ok-50' : 'border-danger-300 bg-danger-50')
     : (filled ? 'border-warn-300 bg-warn-50' : 'border-dashed border-slate-300 bg-white');
+
+  // «حضوری» یا «ارجاعی»: فقط برای مراحل اجباریِ زنجیره (required) معنا دارد؛
+  // ارجاعِ اختیاریِ ناظر (required=false) همیشه ارجاعی است و این سوییچ لازم ندارد.
+  const theMode = (mode === 'referral') ? 'referral' : 'onsite';
+  const showModeSwitch = required && !!onModeChange;
 
   return (
     <div className={'rounded-2xl border p-4 ' + tone}>
@@ -7555,7 +7578,9 @@ function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChan
           </h4>
           <p className="text-xs text-slate-500 mt-0.5">
             {required
-              ? 'برگه پس از امضای مرحله‌ی قبل به این فرد می‌رسد و در صفحه‌ی «در انتظار امضا»ی او ظاهر می‌شود.'
+              ? (theMode === 'referral'
+                ? 'برگه مستقیماً برای این فرد ارجاع می‌شود و در صفحه‌ی «در انتظار امضا»ی او ظاهر می‌شود؛ از شما پرسیده نمی‌شود که آیا کنار دستگاه حاضر است.'
+                : 'همان لحظه که «حضوری» را می‌زنید، پد امضا باز می‌شود و امضایش را همین‌جا، داخل فرم می‌گیرید؛ امضا همراه برگه ثبت می‌شود و بعد از ثبت دوباره پرسیده نمی‌شود. اگر پد را ببندید، بعد از ثبت یک‌بار دیگر پرسیده می‌شود.')
               : 'ناظر / تحویل‌گیرنده در محل حاضر نیست؟ برگه را به او ارجاع دهید تا بعداً از صفحه‌ی «در انتظار امضا» امضا کند. ثبت بازرسی بدون این امضا هم مجاز است.'}
           </p>
         </div>
@@ -7566,6 +7591,28 @@ function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChan
           </button>
         )}
       </div>
+
+      {showModeSwitch && (
+        <div className="flex rounded-xl border border-slate-200 bg-slate-50 p-1 mb-3 text-xs">
+          <button type="button" onClick={() => {
+              // «حضوری» = همان لحظه پد امضا باز می‌شود (نه بعد از ثبت).
+              // اگر این تب از قبل فعال است و امضا هم گرفته شده، دوباره پد را
+              // روی صورت کاربر باز نمی‌کنیم؛ برای تغییر، دکمه‌ی «تغییر» پایین هست.
+              const wasOnsite = theMode === 'onsite';
+              onModeChange('onsite');
+              if (!wasOnsite || !onsiteSig) { if (onCaptureOnsite) onCaptureOnsite(); }
+            }}
+            className={'flex-1 rounded-lg py-2 font-medium transition ' +
+              (theMode === 'onsite' ? 'bg-white text-brand-700 shadow-sm border border-brand-200' : 'text-slate-500 hover:text-slate-700')}>
+            ✍️ حضوری <span className="block text-[10px] font-normal opacity-75 mt-0.5">{onsiteSig ? 'امضا گرفته شد' : 'همان‌جا پد امضا باز می‌شود'}</span>
+          </button>
+          <button type="button" onClick={() => onModeChange('referral')}
+            className={'flex-1 rounded-lg py-2 font-medium transition ' +
+              (theMode === 'referral' ? 'bg-white text-brand-700 shadow-sm border border-brand-200' : 'text-slate-500 hover:text-slate-700')}>
+            ↪️ ارجاعی <span className="block text-[10px] font-normal opacity-75 mt-0.5">از صف خودش امضا می‌کند</span>
+          </button>
+        </div>
+      )}
 
       {candidates.length === 0 && !selected ? (
         <p className="text-xs text-slate-500 bg-white rounded-lg border border-slate-200 px-3 py-2">
@@ -7592,10 +7639,45 @@ function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChan
         </div>
       )}
 
+      {/* «حضوری» = گرفتن امضا در همان فرم. پیش از این، این سوییچ فقط یک
+          نشانه بود و پد امضا بعد از ثبت (مودال OnSiteSignModal) باز می‌شد؛
+          حالا همان لحظه‌ای که «حضوری» زده می‌شود پد باز می‌شود و امضا تا ثبت
+          نهایی داخل فرم نگه داشته می‌شود. */}
+      {showModeSwitch && theMode === 'onsite' && (
+        <div className="mb-3">
+          {!filled ? (
+            <p className="text-[11px] text-slate-500 bg-white rounded-lg border border-dashed border-slate-300 px-3 py-2">
+              ابتدا «امضاکننده‌ی این مرحله» را انتخاب کنید؛ پد امضا به نام حساب کاربری همان فرد باز می‌شود.
+            </p>
+          ) : onsiteSig ? (
+            <div className="rounded-xl border border-ok-300 bg-ok-50 p-3 flex flex-wrap items-center gap-2.5">
+              <img src={onsiteSig.image} alt="امضای حضوری" className="h-12 w-24 object-contain bg-white rounded-lg border border-ok-200" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-ok-800">✅ امضای حضوری «{onsiteSig.name}» گرفته شد</p>
+                <p className="text-[11px] text-ok-700 mt-0.5">همراه برگه ثبت می‌شود و این مرحله همان‌جا بسته می‌شود.</p>
+              </div>
+              <button type="button" onClick={() => onCaptureOnsite && onCaptureOnsite()}
+                className="shrink-0 text-[11px] px-2.5 py-1.5 rounded-lg border border-ok-300 bg-white text-ok-800 hover:bg-ok-100">تغییر امضا</button>
+              <button type="button" onClick={() => onClearOnsite && onClearOnsite()}
+                className="shrink-0 text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-danger-600">حذف</button>
+            </div>
+          ) : (
+            <button type="button" onClick={() => onCaptureOnsite && onCaptureOnsite()}
+              className="w-full rounded-xl border-2 border-dashed border-brand-300 hover:border-brand-500 bg-brand-50/40 px-3 py-3 text-xs text-brand-800">
+              ✍️ گرفتن امضای حضوری «{onsiteName || 'این فرد'}» — پد امضا همین‌جا باز می‌شود
+            </button>
+          )}
+        </div>
+      )}
+
       {filled && selected && (
         <p className="text-xs text-slate-600 mt-2.5 bg-white rounded-lg border border-slate-200 px-3 py-2">
-          <b>{selected.name || selected.username}</b> این مرحله را امضا می‌کند. تا آن لحظه وضعیت برگه
-          «در انتظار امضا» می‌ماند.
+          <b>{selected.name || selected.username}</b> این مرحله را امضا می‌کند.
+          {required && theMode === 'referral'
+            ? ' برگه مستقیماً ارجاع می‌شود؛ تا امضا، وضعیتش «در انتظار امضا» می‌ماند.'
+            : (onsiteSig
+              ? ' امضایش همین‌جا گرفته شده و با ثبت برگه، این مرحله بسته می‌شود.'
+              : ' اگر امضایش را همین‌جا نگیرید، بعد از ثبت پرسیده می‌شود و در غیر این صورت تا آن لحظه وضعیت برگه «در انتظار امضا» می‌ماند.')}
         </p>
       )}
     </div>
@@ -7611,16 +7693,20 @@ function SignReferralBox({ users, currentUser, value, note, onChange, onNoteChan
  * لازم دارد — لیست هر select، انتخابِ مرحله‌ی دیگر را از خودش حذف می‌کند تا
  * کاربر اصلاً نتواند یک نفر را دوبار بگذارد.
  */
-function SignChainBox({ users, currentUser, selection, notes, onSelect, onNote, inspectorSigned, slots }) {
+function SignChainBox({ users, currentUser, selection, notes, onSelect, onNote, inspectorSigned, slots,
+                        modes, onModeChange, onsiteSigs, onCaptureOnsite, onClearOnsite }) {
   const sel = selection || {};
+  const theModes = modes || {};
+  const theSigs = onsiteSigs || {};
   const theSlots = (Array.isArray(slots) && slots.length ? slots : SIGN_SLOT_SEQUENCE).filter(s => SIGN_SLOTS[s]);
   return (
     <div className="rounded-2xl border border-brand-500/30 bg-white p-4 space-y-3">
       <div>
         <h4 className="font-bold text-slate-800 text-sm">زنجیره‌ی امضا ({signerCountLabel(theSlots.length + 1)} — اجباری، به‌ترتیب)</h4>
         <p className="text-xs text-slate-500 mt-0.5">
-          برگه پس از ثبت، به‌ترتیب به این افراد می‌رسد. هر گیرنده می‌تواند «امضا در محل» بزند
-          یا برگه را به فرد دیگری «ارجاع» دهد. تا وقتی مرحله‌ی قبلی امضا نشده، نفر بعدی اجازه‌ی امضا ندارد.
+          برگه پس از ثبت، به‌ترتیب به این افراد می‌رسد. برای هر مرحله انتخاب کنید «حضوری» (همان لحظه پد امضا باز
+          می‌شود و امضایش را داخل همین فرم می‌گیرید) یا «ارجاعی» (مستقیم به صف امضای خودش برود). تا وقتی مرحله‌ی
+          قبلی امضا نشده، نفر بعدی اجازه‌ی امضا ندارد.
         </p>
       </div>
 
@@ -7635,6 +7721,10 @@ function SignChainBox({ users, currentUser, selection, notes, onSelect, onNote, 
           users={users} currentUser={currentUser}
           exclude={theSlots.filter(s => s !== slot).map(s => sel[s]).filter(Boolean)}
           value={sel[slot] || ''} note={(notes || {})[slot] || ''}
+          mode={theModes[slot] || 'onsite'} onModeChange={onModeChange ? (m => onModeChange(slot, m)) : null}
+          onsiteSig={theSigs[slot] || null}
+          onCaptureOnsite={onCaptureOnsite ? (() => onCaptureOnsite(slot)) : null}
+          onClearOnsite={onClearOnsite ? (() => onClearOnsite(slot)) : null}
           onChange={v => onSelect(slot, v)} onNoteChange={v => onNote(slot, v)} />
       ))}
     </div>
@@ -7723,12 +7813,73 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
   // گیرنده‌ی هر مرحله از زنجیره‌ی امضا (متناسب با تعداد امضای همین چک‌لیست)
   const [chainSel, setChainSel] = useState({});
   const [chainNotes, setChainNotes] = useState({});
+  // حالت هر مرحله: 'onsite' (پیش‌فرض؛ همان لحظه پد امضا باز می‌شود و امضایش
+  // داخل فرم گرفته می‌شود) یا 'referral' (مستقیم و بدون پرسش، به صف
+  // «در انتظار امضا»ی خودش ارجاع شود).
+  const [chainMode, setChainMode] = useState({});
+  // امضاهای حضوریِ گرفته‌شده در خودِ فرم (پیش از ثبت) — کلید = شیار مرحله.
+  // موقع «ثبت نهایی» به‌ترتیب زنجیره روی برگه اعمال می‌شوند.
+  const [chainOnsiteSigs, setChainOnsiteSigs] = useState({});
+  const [onsitePadSlot, setOnsitePadSlot] = useState(null);
 
   useEffect(() => {
     setAnswers({}); setSignatures({});
-    setChainSel({}); setChainNotes({});
+    setChainSel({}); setChainNotes({}); setChainMode({});
+    setChainOnsiteSigs({}); setOnsitePadSlot(null);
     setPhotos([]);
   }, [templateId, selectedAssetId]);
+
+  /**
+   * «حضوری» باید همان لحظه پد امضا را باز کند. ولی امضا یک اظهار شخصی است و
+   * به نام **حساب کاربریِ خودِ گیرنده** قفل می‌شود؛ پس پیش از باز کردن پد
+   * بررسی می‌کنیم که مرحله گیرنده‌ی معتبر داشته باشد و نام حسابش خالی نباشد
+   * (وگرنه پد با نام خالی باز می‌شد و دکمه‌ی «ثبت امضا» بی‌صدا غیرفعال می‌ماند).
+   */
+  const openOnsitePad = (slot) => {
+    const chosen = chainSel[slot];
+    if (!chosen) {
+      notify('اول «امضاکننده‌ی این مرحله» را انتخاب کنید تا پد امضا به نام خودش باز شود.', 'error');
+      return;
+    }
+    const u = (data.users || []).find(x => String(x.id) === String(chosen));
+    if (!u) { notify('کاربر انتخاب‌شده پیدا نشد؛ دوباره انتخاب کنید.', 'error'); return; }
+    if (u.active === false) {
+      notify('کاربر «' + (u.name || u.username) + '» غیرفعال است و نمی‌تواند امضا کند.', 'error');
+      return;
+    }
+    if (!resolveSignerName(u)) {
+      notify('نام حساب کاربری «' + (u.username || '—') + '» خالی است؛ از ادمین بخواهید نامش را در صفحه «کاربران» کامل کند.', 'error');
+      return;
+    }
+    setOnsitePadSlot(slot);
+  };
+
+  const clearOnsiteSig = (slot) => setChainOnsiteSigs(s => {
+    if (!s || !s[slot]) return s;
+    const n = Object.assign({}, s); delete n[slot]; return n;
+  });
+
+  const changeChainMode = (slot, m) => {
+    setChainMode(s => Object.assign({}, s, { [slot]: m }));
+    // «ارجاعی» یعنی امضا در دستگاه/صفِ خودِ گیرنده گرفته می‌شود؛ امضای حضوریِ
+    // از پیش گرفته‌شده دیگر معنا ندارد و نباید بی‌صدا روی برگه بنشیند.
+    if (m === 'referral') clearOnsiteSig(slot);
+  };
+
+  const changeChainSel = (slot, v) => {
+    // امضا به یک فرد مشخص تعلق دارد؛ با عوض‌شدن گیرنده، امضای قبلی باطل می‌شود
+    // (انتخاب دوباره‌ی همان فرد چیزی را پاک نمی‌کند).
+    if (String(chainSel[slot] || '') !== String(v || '')) clearOnsiteSig(slot);
+    setChainSel(s => Object.assign({}, s, { [slot]: v }));
+  };
+
+  // مشخصات پد امضای حضوری: نام از حساب کاربریِ گیرنده (قفل‌شده) و شماره‌ی
+  // انسانی مرحله (مرحله‌ی ۱ خودِ بازرس است، پس +۲).
+  const onsitePadUser = onsitePadSlot
+    ? (data.users || []).find(u => String(u.id) === String(chainSel[onsitePadSlot]))
+    : null;
+  const onsitePadName = onsitePadUser ? resolveSignerName(onsitePadUser) : '';
+  const onsitePadStepNo = onsitePadSlot ? (requiredSlots.indexOf(onsitePadSlot) + 2) : 0;
 
   // رفع ایراد ۲-۷: حتی اگر صفحه‌ی «اجرای بازرسی» به کاربر واگذار شده باشد،
   // نقش «مشاهده‌گر» اجازه‌ی ثبت بازرسی ندارد. (پیش از هر بازگشت زودهنگام،
@@ -7817,6 +7968,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
           toUser: data.users.find(u => u.id === chainSel[slot]),
           slot: slot,
           note: chainNotes[slot] || '',
+          skipOnsitePrompt: chainMode[slot] === 'referral',
         })),
         byUser: currentUser,
       });
@@ -7864,14 +8016,35 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
       createdAt: now.getTime(),
       updatedAt: now.getTime(),
     };
+
+    // «حضوری» در خودِ فرم: امضاهایی که پیش از ثبت، کنار دستگاه گرفته شده‌اند
+    // همان‌جا روی برگه می‌نشینند. `applyOnsiteSignatureToRecord` فقط **مرحله‌ی
+    // فعال** را جلو می‌برد، پس پیمایش به ترتیب `requiredSlots` (= ترتیب شیارها
+    // در زنجیره) کافی است و ترتیب امضاها دست‌نخورده می‌ماند. امضای مرحله‌ای که
+    // نوبتش نرسیده نادیده گرفته می‌شود (نه این‌که بی‌صدا روی برگه بنشیند).
+    let finalRecord = record;
+    let onsiteApplied = 0;
+    if (signRequest) {
+      requiredSlots.forEach(slot => {
+        const sig = chainOnsiteSigs[slot];
+        if (!sig || !sig.image) return;
+        const u = (data.users || []).find(x => String(x.id) === String(chainSel[slot]));
+        if (!u) return;
+        const act = activeSignStep(normalizeSignRequest(finalRecord.signRequest));
+        if (!act || String(act.toUserId) !== String(u.id)) return;
+        const next = applyOnsiteSignatureToRecord(finalRecord, sig, u, currentUser, now.getTime());
+        if (next) { finalRecord = next; onsiteApplied += 1; }
+      });
+    }
+
     update(d => {
-      d.records.unshift(record);
+      d.records.unshift(finalRecord);
       // اقدام اصلاحی خودکار: بازرسی «ناموفق (حیاتی)» بی‌پاسخ نمی‌ماند؛ همان لحظه
       // یک دستورکار باز می‌شود و در صفحه‌ی «اقدام اصلاحی» تا رفع مشکل پیگیری می‌شود.
       if (result.criticalFail) {
         d.correctives.unshift({
           id: uid('cor'),
-          recordId: record.id,
+          recordId: finalRecord.id,
           assetId: asset.id, assetCode: asset.code,
           templateName: template.name,
           reason: 'بازرسی ناموفق (حیاتی) — ' + (result.details.filter(x => x.critical && (x.earned === null || x.earned === 0)).map(x => x.label).join('؛ ') || 'رد آیتم حیاتی'),
@@ -7886,15 +8059,25 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         const idx = d.assignments.findIndex(a => a.id === assignmentId);
         if (idx > -1) {
           d.assignments[idx].status = 'done';
-          d.assignments[idx].recordId = record.id;
+          d.assignments[idx].recordId = finalRecord.id;
           d.assignments[idx].completedAt = now.toISOString();
           d.assignments[idx].updatedAt = now.getTime();
         }
       }
     });
-    notify(signRequest
-      ? `بازرسی ثبت شد. زنجیره‌ی امضا (${signerCountLabel(signerCount)}) آغاز شد و اکنون نوبت «${signRequest.toUserName || 'کاربر انتخابی'}» است.`
-      : 'بازرسی ثبت شد؛ فقط امضای بازرس لازم بود و برگه کامل است.', 'success');
+    // پیام موفقیت از روی **وضعیت نهاییِ زنجیره** ساخته می‌شود، نه زنجیره‌ی اولیه؛
+    // وگرنه بعد از امضای حضوریِ درون‌فرمی، نام کسی «نوبت فعلی» اعلام می‌شد که
+    // همان لحظه امضا کرده بود.
+    const srDone = normalizeSignRequest(finalRecord.signRequest);
+    const stepLeft = srDone ? activeSignStep(srDone) : null;
+    const onsiteNote = onsiteApplied
+      ? ' و ' + toPersianDigits(onsiteApplied) + ' امضای حضوری هم ثبت شد'
+      : '';
+    notify(!signRequest
+      ? 'بازرسی ثبت شد؛ فقط امضای بازرس لازم بود و برگه کامل است.'
+      : (stepLeft
+        ? `بازرسی ثبت شد${onsiteNote}. اکنون نوبت «${stepLeft.toUserName || 'امضاکننده‌ی بعدی'}» است.`
+        : `بازرسی ثبت شد${onsiteNote} و همه‌ی امضاها (${signerCountLabel(signerCount)}) کامل شد.`), 'success');
 
     // ساخت و ارسال PDF به Drive؛ کاملاً مستقل از همگام‌سازی پایگاه است، بنابراین
     // شکست آن هرگز باعث از دست رفتن سابقه نمی‌شود.
@@ -7902,11 +8085,14 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
     if (cfg.url && cfg.apiKey) {
       // رفع کندی: بعد از ثبت، PDF با موتور سرور ساخته می‌شود نه روی گوشی؛
       // پیام موفقیت هم بعد از رسیدن پاسخ درایو می‌آید.
-      sendRecordToAppsScript(cfg.url, cfg.apiKey, record, data.settings, notify, { serverOnly: true })
+      // ⚠️ finalRecord (نه record): امضاهای حضوریِ درون‌فرمی باید همین‌جا روی
+      // PDF بروند، وگرنه برگه‌ی درایو بی‌امضا می‌ماند و بعداً با PDF دیگری
+      // جایگزین می‌شود.
+      sendRecordToAppsScript(cfg.url, cfg.apiKey, finalRecord, data.settings, notify, { serverOnly: true })
         .then(json => {
           if (json && json.pdfUrl) {
             update(d => {
-              const i = d.records.findIndex(r => r.id === record.id);
+              const i = d.records.findIndex(r => r.id === finalRecord.id);
               if (i > -1) d.records[i].pdfUrl = json.pdfUrl;
             });
           }
@@ -7914,7 +8100,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         .catch(e => notify('سابقه ثبت شد، اما ساخت PDF در درایو ناموفق بود: ' + e.message, 'error'));
     }
     setSubmitting(false);
-    if (onFinish) onFinish(record);
+    if (onFinish) onFinish(finalRecord);
   };
 
   return (
@@ -8004,7 +8190,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="font-bold text-slate-800 text-sm">امضاها — {signerCountLabel(signerCount)}</h3>
           {requiredSlots.length > 0 && (
-            <p className="text-[11px] text-slate-400">سایر امضاها بعداً از صفحه «در انتظار امضا» گرفته می‌شود؛ در محل فقط بازرس امضا می‌کند.</p>
+            <p className="text-[11px] text-slate-400">امضای مرحله‌های بعد را می‌توانید همین‌جا «حضوری» بگیرید (با زدن «حضوری» پد امضا باز می‌شود) یا «ارجاعی» به صف خودشان بفرستید.</p>
           )}
         </div>
         <button onClick={() => setSigPad('inspector')}
@@ -8016,18 +8202,23 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
             </div>
           ) : '✍️ ثبت امضای بازرس / اجراکننده' + (requiredSlots.length ? ' (مرحله ۱ — الزامی)' : ' (امضا در محل — الزامی)')}
         </button>
-        {/* امضای ناظر/تأییدکننده عمداً اینجا گرفته نمی‌شود: هویت امضاکننده
-            باید از حساب کاربری خودش بیاید، نه از دستگاهِ بازرس. گیرنده یا
-            «در محل» امضا می‌کند یا به دیگری ارجاع می‌دهد (صف امضا). */}
+        {/* امضای ناظر/تأییدکننده در بخش «زنجیره‌ی امضا» (پایین) گرفته می‌شود،
+            نه این‌جا: هویت امضاکننده باید از حساب کاربری **خودِ گیرنده** بیاید
+            (پد امضا با نام او قفل است) و نشانِ «امضا در محل» + نام دریافت‌کننده‌ی
+            دستگاه هم برای ممیزی ثبت می‌شود. */}
       </div>
 
       {requiredSlots.length > 0 ? (
         <SignChainBox users={data.users} currentUser={currentUser}
           slots={requiredSlots}
-          selection={chainSel} notes={chainNotes}
+          selection={chainSel} notes={chainNotes} modes={chainMode}
+          onsiteSigs={chainOnsiteSigs}
           inspectorSigned={!!signatures.inspector}
-          onSelect={(slot, v) => setChainSel(s => Object.assign({}, s, { [slot]: v }))}
-          onNote={(slot, v) => setChainNotes(s => Object.assign({}, s, { [slot]: v }))} />
+          onSelect={changeChainSel}
+          onNote={(slot, v) => setChainNotes(s => Object.assign({}, s, { [slot]: v }))}
+          onModeChange={changeChainMode}
+          onCaptureOnsite={openOnsitePad}
+          onClearOnsite={clearOnsiteSig} />
       ) : (
         <div className="rounded-2xl border border-ok-300 bg-ok-50 p-4 text-xs text-ok-800 leading-6">
           ✅ این چک‌لیست فقط <b>یک امضا</b> لازم دارد: امضای بازرس که همین‌جا، در محل گرفته می‌شود.
@@ -8048,6 +8239,24 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         initialName={inspectorName}
         lockName
         onSave={(sig) => setSignatures(s => ({ ...s, inspector: sig }))} />
+
+      {/* پد امضای «حضوری» برای مرحله‌های زنجیره — همان لحظه که دکمه‌ی «حضوری»
+          زده می‌شود باز می‌شود. نام از حساب کاربریِ خودِ گیرنده خوانده و قفل
+          می‌شود؛ امضا تا «ثبت نهایی» در state فرم نگه داشته می‌شود و همان‌جا
+          با applyOnsiteSignatureToRecord روی برگه می‌نشیند. */}
+      <SignaturePad open={!!onsitePadSlot} onClose={() => setOnsitePadSlot(null)}
+        roleLabel={onsitePadSlot
+          ? 'امضای حضوری — ' + signSlotLabel(onsitePadSlot)
+            + (onsitePadStepNo ? ' (مرحله ' + toPersianDigits(onsitePadStepNo) + ')' : '')
+          : 'امضای حضوری'}
+        initialName={onsitePadName}
+        lockName
+        onSave={(sig) => {
+          const slot = onsitePadSlot;
+          if (!slot) return;
+          setChainOnsiteSigs(s => Object.assign({}, s, { [slot]: sig }));
+          notify('امضای حضوری «' + (sig.name || '') + '» گرفته شد؛ همراه برگه ثبت می‌شود.', 'success');
+        }} />
     </div>
   );
 }
@@ -8450,8 +8659,11 @@ function SignChainTrack({ rec, compact }) {
    ۱۵-ب. مودال «امضای حضوری در محل»
    ============================================================ */
 /**
- * بلافاصله پس از ثبت بازرسیِ چندامضایی باز می‌شود و می‌پرسد: گیرنده‌ی مرحله‌ی
- * بعد (مثلاً راننده/ناظر) الان کنار شماست؟
+ * «تورِ امنِ» امضای حضوری — مسیر اصلی گرفتن امضای حضوری حالا خودِ فرم است:
+ * با زدن دکمه‌ی «حضوری» در زنجیره‌ی امضا، پد امضا همان لحظه باز می‌شود و امضا
+ * همراه برگه ثبت می‌شود. این مودال فقط برای مرحله‌هایی باز می‌ماند که «حضوری»
+ * انتخاب شده ولی پدشان بسته شده/امضا گرفته نشده — بلافاصله پس از ثبت می‌پرسد:
+ * گیرنده‌ی مرحله‌ی بعد (مثلاً راننده/ناظر) الان کنار شماست؟
  *  - بله → دستگاه را دست او می‌دهند، پد امضا با نام خودش باز می‌شود و مرحله
  *    همان‌جا بسته می‌شود (applyOnsiteSignatureToRecord) — بدون ارجاع.
  *  - نه → هیچ کاری انجام نمی‌شود؛ برگه طبق روال عادی به صف «در انتظار امضا»ی
@@ -8474,12 +8686,20 @@ function SignChainTrack({ rec, compact }) {
 function OnSiteSignModal({ rec, onClose }) {
   const { data, update, currentUser, notify, ensureRecordVisuals } = useAppData();
   const [padOpen, setPadOpen] = useState(false);
-  if (!rec) return null;
   // همیشه از داده‌ی زنده بخوان؛ ممکن است در همین فاصله برگه عوض شده باشد
-  const live = (data.records || []).find(r => r.id === rec.id) || rec;
-  const sr = normalizeSignRequest(live.signRequest);
-  const step = activeSignStep(sr);
-  if (!step) return null; // زنجیره در فاصله‌ی کوتاه امضا/لغو شده → چیزی نپرس
+  const live = rec ? ((data.records || []).find(r => r.id === rec.id) || rec) : null;
+  const sr = live ? normalizeSignRequest(live.signRequest) : null;
+  const step = sr ? activeSignStep(sr) : null;
+
+  // این مرحله از ابتدا «ارجاعی» تعیین شده (نه «حضوری») — چیزی پرسیده نمی‌شود؛
+  // برگه بی‌صدا در صف «در انتظار امضا»ی گیرنده می‌ماند. (hook همیشه صدا زده
+  // می‌شود تا ترتیب هوک‌ها ثابت بماند؛ خودِ شرط داخل بدنه‌اش است.)
+  useEffect(() => {
+    if (step && step.skipOnsitePrompt) onClose();
+  }, [step && step.skipOnsitePrompt, step && step.toUserId]);
+
+  if (!rec || !step) return null; // زنجیره در فاصله‌ی کوتاه امضا/لغو شده → چیزی نپرس
+  if (step.skipOnsitePrompt) return null;
   const toUser = (data.users || []).find(u => String(u.id) === String(step.toUserId));
   const toName = (toUser && resolveSignerName(toUser)) || step.toUserName || '—';
   const stepNo = sr.current + 2; // +۱ امضای بازرس، +۱ برای شماره‌ی انسانی
@@ -12137,6 +12357,39 @@ async function signedCall(url, apiKey, action, payload, folderName) {
 }
 /* @core-end: transport */
 
+/**
+ * نسخه‌ی Code.gs که **این فایل** انتظار دارد.
+ *
+ * عمداً از دلِ خودِ `APPS_SCRIPT_CODE` خوانده می‌شود نه یک ثابت دستی: کد سرور
+ * توسط `tools/build.mjs` از فایل Code.gs تولید و این‌جا جاسازی می‌شود، پس یک
+ * ثابت جداگانه به‌محض به‌روزرسانی سرور کهنه می‌شد و پیامِ «نسخه‌ی لازم» غلط
+ * از آب درمی‌آمد. تابع است (نه مقدار ثابت) تا در TDZ `const APPS_SCRIPT_CODE`
+ * گیر نکند.
+ */
+function expectedServerVersion() {
+  try {
+    const src = (typeof APPS_SCRIPT_CODE === 'string') ? APPS_SCRIPT_CODE : '';
+    const m = /var\s+SERVER_VERSION\s*=\s*["']([^"']+)["']/.exec(src);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+
+/**
+ * برچسب کوتاهِ اختلاف نسخه برای پیام‌های خطا.
+ * `got` نسخه‌ای است که سرور در پاسخ برگردانده (`doPost` روی هر پاسخ
+ * `result.version` می‌گذارد)؛ خالی یعنی سرور آن‌قدر قدیمی است که نسخه را
+ * برنمی‌گرداند.
+ */
+function serverVersionHint(got) {
+  const want = expectedServerVersion();
+  const g = String(got || '').trim();
+  if (!g) return want ? 'سرور نسخه‌اش را اعلام نکرد (نشانه‌ی Code.gs قدیمی)؛ نسخه‌ی لازم ' + want : 'سرور نسخه‌اش را اعلام نکرد';
+  if (want && g !== want) return 'نسخه‌ی سرور ' + g + ' است ولی این برنامه به ' + want + ' نیاز دارد';
+  return 'نسخه‌ی سرور ' + g;
+}
+
+const SERVER_UPDATE_HOWTO = 'راه‌حل: «تنظیمات ← کپی کد سرور (Code.gs)»، سپس در Apps Script با Deploy ← Manage deployments ← Edit ← Version: New version دوباره دیپلوی کنید (بدون ساخت نسخه‌ی جدید، آدرس /exec همان کد قبلی را اجرا می‌کند).';
+
 /** ساخت PDF سمت کلاینت (دقیق‌تر از تبدیل HTML در سرور) — رفع ایراد ۲-۵ */
 async function htmlToPdfBase64(innerHtml, styleCss) {
   if (typeof window === 'undefined') return null;
@@ -12366,8 +12619,16 @@ async function pushCloudBackup(url, apiKey, fullData, org, notify) {
 async function testAppsScriptConnection(url, apiKey, org, notify) {
   try {
     const json = await callAppsScript(url, await buildEnvelope('ping', {}, apiKey, cloudFolderName(org)));
-    notify('اتصال برقرار است — نسخه سرور: ' + (json.version || '؟') +
-      (json.revision !== undefined ? ' | بازنگری پایگاه: ' + toPersianDigits(json.revision) : ''), 'success');
+    // «اتصال برقرار است» به‌تنهایی گمراه‌کننده است: رایج‌ترین علتِ کارنکردنِ
+    // همگام‌سازی، وصل بودن به یک دیپلویمنتِ قدیمی است (کد ویرایش شده ولی
+    // «New version» ساخته نشده). پس نسخه صریح سنجیده و اعلام می‌شود.
+    const want = expectedServerVersion();
+    const got = String((json && json.version) || '').trim();
+    const mismatch = !!want && got !== want;
+    notify('اتصال برقرار است — نسخه سرور: ' + (got || '؟') +
+      (want ? ' (نسخه‌ی لازم: ' + want + ')' : '') +
+      (json && json.revision !== undefined ? ' | بازنگری پایگاه: ' + toPersianDigits(json.revision) : '') +
+      (mismatch ? ' — ⚠️ ' + SERVER_UPDATE_HOWTO : ''), mismatch ? 'error' : 'success');
     return json;
   } catch (e) { notify('اتصال ناموفق بود: ' + e.message, 'error'); return null; }
 }
@@ -12854,7 +13115,8 @@ function HelpPage() {
         <h3 className="font-bold text-slate-800 text-base">راهنمای استفاده از سامانه چک‌لیست درکاو</h3>
         <p>۱. هر چک‌لیست، زیرسیستم‌های خودش را دارد: در «قالب‌های چک‌لیست» قالب را بسازید، تعداد امضاکنندگانش را همان اول مشخص کنید و زیرسیستم‌هایش را در همان‌جا اضافه کنید. در «تجهیزات» هم هر تجهیز فقط به چک‌لیست مربوط به خودش گره می‌خورد.</p>
         <p>۲. از منوی «اجرای بازرسی» اول چک‌لیست را انتخاب کنید؛ فهرست تجهیزات فقط زیرسیستم‌های همان چک‌لیست را نشان می‌دهد. نام بازرس به‌طور خودکار از حساب کاربری شما خوانده می‌شود و قابل تغییر نیست؛ در پایان، امضای بازرس (در محل) الزامی است و بقیه‌ی امضاها طبق تعداد تعیین‌شده در چک‌لیست از راه زنجیره‌ی امضا گرفته می‌شوند.</p>
-        <p>۳. برگه به‌ترتیب به امضاکننده‌های بعدی می‌رسد و در منوی «در انتظار امضا»یشان ظاهر می‌شود. هر گیرنده دو انتخاب دارد: «امضا در محل» یا «ارجاع به دیگری». فقط خودِ گیرنده یا ادمین اجازه‌ی امضا/ارجاع دارد و تا مرحله‌ی قبلی امضا نشود، نوبت نفر بعدی باز نمی‌شود.</p>
+        <p>۲٫۱. در کادر «زنجیره‌ی امضا»، هر مرحله دو حالت دارد: <b>«حضوری»</b> — همان لحظه که دکمه را می‌زنید پد امضا باز می‌شود و امضای آن فرد را داخل همان فرم می‌گیرید (نامش از حساب کاربری خودش خوانده و قفل می‌شود) و همراه برگه ثبت می‌شود؛ <b>«ارجاعی»</b> — برگه مستقیم به صف «در انتظار امضا»ی خودش می‌رود. اگر پد را ببندید یا امضا را بگیرید و بعد حالت را به «ارجاعی» برگردانید، امضای گرفته‌شده حذف می‌شود.</p>
+        <p>۳. مرحله‌هایی که «ارجاعی» تعیین شده‌اند (یا «حضوری» بوده‌اند ولی امضایشان گرفته نشده) به‌ترتیب به امضاکننده‌های بعدی می‌رسند و در منوی «در انتظار امضا»یشان ظاهر می‌شوند. هر گیرنده دو انتخاب دارد: «امضا در محل» یا «ارجاع به دیگری». فقط خودِ گیرنده یا ادمین اجازه‌ی امضا/ارجاع دارد و تا مرحله‌ی قبلی امضا نشود، نوبت نفر بعدی باز نمی‌شود.</p>
         <p>۳٫۱. ورود ماندگار: اگر هنگام ورود تیک «مرا به خاطر بسپار» روشن باشد، دفعه‌ی بعد بدون پرسیدن رمز، مستقیم وارد می‌شوید و تنظیمات اتصال هم روی همین دستگاه ذخیره می‌ماند. دکمه‌ی «خروج» این حالت را پاک می‌کند.</p>
         <p>۴. در «سوابق»، با فیلتر بازه‌ی تاریخ (شمسی) و دسته‌بندی (برق/ماشین‌آلات/…)، می‌توانید چاپ تکی، چاپ پشت‌سرهم، <b>دانلود PDF پشت‌سرهم</b>، گزارش تجمیعی، <b>گزارش عدم انطباق‌ها</b> و خروجی اکسل/CSV بگیرید. اگر برگه‌ای تیک نزنید، خروجی روی همه‌ی نتایج فیلترشده اعمال می‌شود.</p>
         <p>۵. آیتم‌های «حیاتی» در صورت رد شدن، نتیجه را به‌طور خودکار «ناموفق (حیاتی)» می‌کنند، حتی اگر درصد امتیاز بالا باشد.</p>
@@ -13653,7 +13915,16 @@ function AppShell() {
 
   let content;
   if (page === 'dashboard') content = <DashboardPage goPage={goPage} goRunner={goRunner} />;
-  else if (page === 'runner') content = <RunnerPage assetId={runnerAssetId} assignmentId={runnerAssignmentId} onFinish={(rec) => { if (rec && rec.signRequest) setOnsiteRec(rec); goPage('records'); }} />;
+  else if (page === 'runner') content = <RunnerPage assetId={runnerAssetId} assignmentId={runnerAssignmentId} onFinish={(rec) => {
+    // مودال «امضای حضوری» فقط وقتی لازم است که مرحله‌ی فعالی باقی مانده باشد و
+    // آن مرحله از ابتدا «ارجاعی» تعیین نشده باشد. امضاهای حضوریِ گرفته‌شده در
+    // خودِ فرم (با زدن دکمه‌ی «حضوری») زنجیره را جلو برده‌اند، پس دوباره پرسیده
+    // نمی‌شود؛ این مودال فقط تورِ امنِ مرحله‌هایی است که پدشان بسته شده.
+    const sr = rec ? normalizeSignRequest(rec.signRequest) : null;
+    const step = sr ? activeSignStep(sr) : null;
+    if (step && !step.skipOnsitePrompt) setOnsiteRec(rec);
+    goPage('records');
+  }} />;
   else if (page === 'coverage') content = <CoveragePage goRunner={goRunner} />;
   else if (page === 'correctives') content = <CorrectivesPage goRecord={goRecord} />;
   else if (page === 'assets') content = <AssetsPage goRunner={goRunner} />;
@@ -13854,5 +14125,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3cf28776e91a2e9',t:'MTc4OTcyMjAwMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
