@@ -5687,6 +5687,10 @@ function DataProvider({ children }) {
     }
     if (!verdict.ok) return 'نام کاربری یا رمز عبور اشتباه است.';
 
+    // اعتبارنامه‌ی ارتقایافته (اگر این ورود یک ارتقای بی‌صدا بوده)؛ برای
+    // فرستادن به سرور به‌عنوان `altPasswordHash` نگه داشته می‌شود — توضیح در
+    // همان‌جا و در `handleAuthLogin` سمت Code.gs.
+    const upgradedCred = verdict.upgrade || null;
     if (verdict.upgrade) {
       // ارتقای بی‌صدا از SHA-256 بدون salt به PBKDF2 + salt (رفع ایراد ۱-۴)
       const up = verdict.upgrade;
@@ -5735,10 +5739,15 @@ function DataProvider({ children }) {
       // `verdict.hash` همان هشی است که همین الان برای بررسی رمز حساب شد؛
       // محاسبه‌ی دوباره‌اش یعنی دو برابر کردن هزینه‌ی PBKDF2 هر ورود.
       const hashForServer = verdict.hash || '';
+      // اگر همین الان هش را ارتقا داده‌ایم، pushِ رکوردِ کاربر و این auth.login
+      // موازی در شبکه‌اند و ترتیب رسیدنشان تضمین‌شده نیست. با فرستادن هر دو هش،
+      // سرور هرکدام را که دارد می‌پذیرد و ورود هیچ‌وقت بر اثر این رقابت شکست
+      // نمی‌خورد. در حالت عادی (بدون ارتقا) رشته‌ی خالی می‌رود.
+      const altHashForServer = (upgradedCred && upgradedCred.passwordHash) || '';
       const userId = user.id;
       (async () => {
         try {
-          const res = await signedCall(cfg.url, cfg.apiKey, 'auth.login', { username: uname, passwordHash: hashForServer, remember: !!remember });
+          const res = await signedCall(cfg.url, cfg.apiKey, 'auth.login', { username: uname, passwordHash: hashForServer, altPasswordHash: altHashForServer, remember: !!remember });
           if (res && res.ok && res.sessionToken) {
             setSession(cur => {
               // ممکن است کاربر در این فاصله خارج شده یا حساب دیگری وارد شده باشد
@@ -9836,7 +9845,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.0
+ *  نسخه: 8.3
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -9907,7 +9916,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.2";
+var SERVER_VERSION = "8.3";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -9915,6 +9924,12 @@ var MAX_OPS_PER_REQUEST = 400;
 var MAX_OPS_LOG_ROWS = 5000;
 var MAX_LOG_ROWS = 20000;
 var SIGNATURE_INLINE_LIMIT = 40000; // کاراکتر؛ بزرگ‌تر از این به Drive می‌رود
+/* سقف امنِ «کلِ» یک سلول شیت. Google Sheets اجازه نمی‌دهد یک سلول بیش از
+   ۵۰٬۰۰۰ کاراکتر باشد و در این مقدار exception می‌دهد. ستون‌های signatures و
+   photos «همه‌ی» تصویرهای یک رکورد را در یک سلول JSON نگه می‌دارند، پس ممکن است
+   چند تصویرِ هرکدام زیر سقفِ بالابری هم مجموعاً از ۵۰٬۰۰۰ بگذرند. ۴۵٬۰۰۰
+   حاشیه‌ی امن می‌گذارد (JSON escaping هم کمی به طول اضافه می‌کند). */
+var SHEET_CELL_SAFE_LIMIT = 45000;
 
 /* =====================================================================
    ۱. تعریف مدل داده (شیت‌ها و ستون‌ها)
@@ -11575,7 +11590,18 @@ function handleAuthLogin(ss, body) {
     if (String(users[i].username) === username && !users[i].deleted && toBool(users[i].active)) { u = users[i]; break; }
   }
   if (!u) return err("نام کاربری یا رمز عبور اشتباه است.", { code: "BAD_CREDENTIALS" });
-  if (!constantTimeEquals(hash, u.passwordHash)) {
+  // «altPasswordHash»: هنگام ارتقای بی‌صدای هش رمز (SHA-256 قدیمی → PBKDF2)
+  // کلاینت هم‌زمان دو کار می‌کند: (۱) اعتبارنامه‌ی ارتقایافته را با db.push به
+  // سرور می‌فرستد و (۲) با هش قدیمی auth.login می‌زند. این دو درخواست موازی‌اند
+  // و auth.login قفل نوشتن نمی‌گیرد، پس اگر push زودتر بنشیند، سرور دیگر هش قدیمی
+  // را ندارد و ورود — بی‌صدا — شکست می‌خورد: sessionToken خالی می‌ماند و
+  // نوشتن‌های حساس تا ورود بعدی در صف گیر می‌کنند.
+  // راه‌حل: کلاینت هر دو هش را می‌فرستد و سرور هرکدام را که با مقدار ذخیره‌شده
+  // یکی بود می‌پذیرد؛ به این ترتیب نتیجه مستقل از ترتیب رسیدن درخواست‌هاست.
+  // امنیت تغییری نمی‌کند: مهاجم همچنان باید یک هشِ معتبرِ همان حساب را بداند.
+  var altHash = String(body.altPasswordHash || "");
+  var hashOk = constantTimeEquals(hash, u.passwordHash) || (!!altHash && constantTimeEquals(altHash, u.passwordHash));
+  if (!hashOk) {
     return err("نام کاربری یا رمز عبور اشتباه است.", { code: "BAD_CREDENTIALS" });
   }
   writeAuditLog("auth.login", { username: username }, 0, username);
@@ -11729,25 +11755,130 @@ function handleRecordGet(ss, body) {
 }
 
 
+/**
+ * کپی یک آبجکتِ امضا/عکس **بدون** بارِ سنگین تصویر.
+ *
+ * چرا کپی کامل و نه فقط چند فیلد مشخص؟
+ * پیش از این، وقتی تصویر امضا از سقف SIGNATURE_INLINE_LIMIT بزرگ‌تر بود و به
+ * Drive منتقل می‌شد، کل آبجکت امضا با
+ *     { fileId, name, title, signedAt, external: true }
+ * «بازنویسی» می‌شد. یعنی هر فیلد دیگری برای همیشه از بین می‌رفت — از جمله
+ * نشان‌های ممیزی:
+ *     onsite              → این امضا حضوری گرفته شده
+ *     onsiteCollectorName → روی دستگاه چه کسی
+ *     signedViaRequest    → از راه زنجیره‌ی درخواست امضا بوده
+ *     requestedByUserId   → چه کسی درخواست داده
+ *     stepIndex           → در کدام مرحله‌ی زنجیره
+ * نتیجه: امضای حضوری روی دستگاه بازرس (تصویر بزرگ‌تر از سقف) بعد از اولین
+ * همگام‌سازی، نشانِ «✍️ امضا در محل» و نام دریافت‌کننده را در چاپ/گزارش/
+ * جزئیات رکورد از دست می‌داد؛ در حالی که همان امضا اگر کوچک بود سالم می‌ماند.
+ *
+ * حالا همه‌ی فیلدها نگه داشته می‌شوند و فقط کلیدهای سنگین حذف می‌شوند:
+ *   - image / dataUrl (بار اصلی تصویر)
+ *   - هر کلید دیگری که مقدارش یک data URL بزرگ باشد (محافظت در برابر فیلدهای
+ *     تازه‌ای که در آینده اضافه می‌شوند و سقف ۵۰٬۰۰۰ کاراکتری سلول شیت را
+ *     می‌شکنند)
+ * فیلدهای extra با اولویت روی کپی نوشته می‌شوند.
+ */
+function stripHeavyImages_(src, extra) {
+  var out = {};
+  var keys = Object.keys(src || {});
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (k === "image" || k === "dataUrl") continue;
+    var v = src[k];
+    if (typeof v === "string" && v.indexOf("data:") === 0 && v.length > 2000) continue;
+    out[k] = v;
+  }
+  var xk = Object.keys(extra || {});
+  for (var j = 0; j < xk.length; j++) out[xk[j]] = extra[xk[j]];
+  return out;
+}
+
+/**
+ * اگر JSONِ نهاییِ یک ستون از SHEET_CELL_SAFE_LIMIT بزرگ‌تر باشد، بزرگ‌ترین
+ * تصویرهای inline را یکی‌یکی به Drive منتقل می‌کند تا زیر سقف برود.
+ *
+ * چرا لازم است؟ سقف ۴۰٬۰۰۰ کاراکتریِ SIGNATURE_INLINE_LIMIT «برای هر تصویر»
+ * است، ولی یک سلول شیت «همه‌ی» تصویرهای آن رکورد را با هم نگه می‌دارد. پس سه
+ * امضای ۳۰٬۰۰۰ کاراکتری — که هرکدام به‌تنهایی مجازند — مجموعاً ۹۰٬۰۰۰
+ * کاراکتر می‌شوند و Google Sheets کل نوشتن را با exception رد می‌کند؛ یعنی
+ * ثبتِ برگه هرگز روی سرور نمی‌نشیند و در صفِ کلاینت گیر می‌کند (و هر تلاش
+ * دوباره هم همان‌جا شکست می‌خورد).
+ *
+ * entries: [{ get(): obj, offload(obj) }] — offload باید ظرف را با نسخه‌ی
+ * سبک‌شده (بدون تصویر) به‌روز کند.
+ */
+function fitCellBudget_(entries, stringify) {
+  var guard = 0;
+  while (guard++ < 80) {
+    var text = "";
+    try { text = stringify() || ""; } catch (eStr) { return; }
+    if (text.length <= SHEET_CELL_SAFE_LIMIT) return;
+    var best = -1, bestLen = 0;
+    for (var i = 0; i < entries.length; i++) {
+      var o = null;
+      try { o = entries[i].get(); } catch (eGet) { o = null; }
+      if (!o || typeof o !== "object" || o.external) continue;
+      var img = o.image || o.dataUrl;
+      if (!img || typeof img !== "string" || img.indexOf("data:") !== 0) continue;
+      if (img.length > bestLen) { bestLen = img.length; best = i; }
+    }
+    if (best < 0) return;   // تصویر inline دیگری نمانده؛ کاری از دست این تابع برنمی‌آید
+    try { entries[best].offload(entries[best].get()); }
+    catch (eOff) { return; } // اگر Drive نپذیرفت، حلقه را می‌شکنیم تا بینهایت نشود
+  }
+}
+
+/** پوشه‌ی مقصد را یک بار پیدا/ساخت می‌کند و کش می‌کند (جلوگیری از تکرار در حلقه). */
+function folderOnce_(getter) {
+  var cached = null;
+  return function () { if (!cached) cached = getter(); return cached; };
+}
+
+/** یک تصویر data URL را در Drive می‌گذارد و نسخه‌ی سبک (بدون تصویر) را برمی‌گرداند. */
+function offloadImage_(folderGetter, fileName, holder, mime) {
+  var img = holder.image || holder.dataUrl;
+  try {
+    var fileId = saveDataUrlFile_(folderGetter(), "", fileName, img);
+    return stripHeavyImages_(holder, { fileId: fileId, external: true });
+  } catch (eExt) {
+    // اگر ذخیره در Drive نشد، تصویر را حذف می‌کنیم تا سلول شیت نشکند
+    return stripHeavyImages_(holder, { external: true, lost: true });
+  }
+}
+
 /** پیوست‌های عکس بزرگ را از سلول شیت به درایو منتقل می‌کند (مثل امضاها).
  *  عکس کوچک (زیر سقف) همان‌جا اینلاین می‌ماند تا کلاینت آفلاین هم ببیند. */
 function externalizePhotos_(ss, rec, body) {
   if (!rec || !rec.photos || !rec.photos.length) return;
   var rootName = (body && body.rootName) || prop("ROOT_FOLDER_NAME", "سامانه چک‌لیست درکاو");
-  rec.photos.forEach(function (ph, idx) {
+  var photos = rec.photos;
+  var folderGetter = folderOnce_(function () {
+    return getOrCreateFolder(getOrCreateFolder(DriveApp.getRootFolder(), rootName), "عکس‌های بازرسی");
+  });
+  var fileFor = function (idx) { return cleanName(rec.id || "record", 40) + "_p" + idx + ".jpg"; };
+
+  photos.forEach(function (ph, idx) {
     if (!ph || typeof ph !== "object") return;
     var img = ph.image || ph.dataUrl;
     if (!img || typeof img !== "string" || img.indexOf("data:") !== 0) return;
     if (img.length <= SIGNATURE_INLINE_LIMIT) { ph.image = img; delete ph.dataUrl; return; }
-    try {
-      var folder = getOrCreateFolder(getOrCreateFolder(DriveApp.getRootFolder(), rootName), "عکس‌های بازرسی");
-      var name = cleanName(rec.id || "record", 40) + "_p" + idx + ".jpg";
-      var fileId = saveDataUrlFile_(folder, "", name, img);
-      rec.photos[idx] = { fileId: fileId, name: ph.name || "", addedAt: ph.addedAt || "", external: true };
-    } catch (eExt) {
-      rec.photos[idx] = { name: ph.name || "", addedAt: ph.addedAt || "", external: true, lost: true };
-    }
+    photos[idx] = offloadImage_(folderGetter, fileFor(idx), ph);
   });
+
+  // سقف «کل» سلول: اگر با همه‌ی عکس‌های inline هنوز بزرگ است، بزرگ‌ترین‌ها به Drive می‌روند
+  var entries = [];
+  for (var i = 0; i < photos.length; i++) {
+    (function (idx) {
+      entries.push({
+        get: function () { return photos[idx]; },
+        offload: function (ph) { photos[idx] = offloadImage_(folderGetter, fileFor(idx), ph); }
+      });
+    })(i);
+  }
+  fitCellBudget_(entries, function () { return JSON.stringify(photos); });
+  rec.photos = photos;
 }
 
 /** تصویر امضا را از سلول شیت بیرون می‌کشد و در Drive ذخیره می‌کند. */
@@ -11758,27 +11889,36 @@ function externalizeSignatures_(ss, rec, body) {
   if (!sigs || typeof sigs !== "object") return;
 
   var rootName = (body && body.rootName) || prop("ROOT_FOLDER_NAME", "سامانه چک‌لیست درکاو");
-  Object.keys(sigs).forEach(function (role) {
+  var folderGetter = folderOnce_(function () {
+    return getOrCreateFolder(getOrCreateFolder(DriveApp.getRootFolder(), rootName), "امضاها");
+  });
+  var fileFor = function (role) {
+    return cleanName(rec.id || "record", 40) + "_" + cleanName(role, 20) + ".png";
+  };
+  var allowInline = String(prop("SIGNATURES_INLINE", "true")).toLowerCase() === "true";
+
+  var roles = Object.keys(sigs);
+  roles.forEach(function (role) {
     var s = sigs[role];
     if (!s || typeof s !== "object") return;
     var img = s.image || s.dataUrl;
     if (!img || typeof img !== "string" || img.indexOf("data:") !== 0) return;
-    if (img.length <= SIGNATURE_INLINE_LIMIT && String(prop("SIGNATURES_INLINE", "true")).toLowerCase() === "true") {
+    if (img.length <= SIGNATURE_INLINE_LIMIT && allowInline) {
       s.image = img; delete s.dataUrl; return;   // کوچک است؛ همان‌جا می‌ماند
     }
-    try {
-      var folder = getOrCreateFolder(getOrCreateFolder(DriveApp.getRootFolder(), rootName), "امضاها");
-      var name = cleanName(rec.id || "record", 40) + "_" + cleanName(role, 20) + ".png";
-      var fileId = saveDataUrlFile_(folder, "", name, img);
-      sigs[role] = {
-        fileId: fileId, name: s.name || "", title: s.title || "", signedAt: s.signedAt || "",
-        external: true
-      };
-    } catch (eExt) {
-      // اگر ذخیره در Drive نشد، تصویر را حذف می‌کنیم تا سلول شیت نشکند
-      sigs[role] = { name: s.name || "", title: s.title || "", signedAt: s.signedAt || "", external: true, lost: true };
-    }
+    sigs[role] = offloadImage_(folderGetter, fileFor(role), s);
   });
+
+  // سقف «کل» سلول: چند امضای کوچک‌تر از سقفِ هر تصویر هم می‌توانند مجموعاً از
+  // ۵۰٬۰۰۰ کاراکترِ مجازِ یک سلول شیت بگذرند و کل نوشتنِ رکورد را بشکنند.
+  var entries = roles.map(function (role) {
+    return {
+      get: function () { return sigs[role]; },
+      offload: function (s) { sigs[role] = offloadImage_(folderGetter, fileFor(role), s); }
+    };
+  });
+  fitCellBudget_(entries, function () { return JSON.stringify(sigs); });
+
   rec.signatures = sigs;
 }
 
@@ -14125,5 +14265,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3cf28776e91a2e9',t:'MTc4OTcyMjAwMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
