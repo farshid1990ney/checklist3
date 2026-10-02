@@ -4158,6 +4158,10 @@ function normalizeEntity(coll, row) {
     if (!Array.isArray(r.pages)) r.pages = [];
     r.active = !(r.active === false || r.active === 'false' || r.active === 0);
   }
+  if (coll === 'assets') {
+    // ستون JSON خالی در شیت null می‌آید؛ حذفش می‌کنیم تا sameEntity آن را «تغییر» حساب نکند.
+    if (r.attrs === null || r.attrs === undefined || typeof r.attrs !== 'object') delete r.attrs;
+  }
   if (coll === 'templates') {
     if (!Array.isArray(r.items)) r.items = [];
     r.archived = !(r.archived === false || r.archived === 'false' || !r.archived);
@@ -4290,8 +4294,17 @@ function snapshotToLocal(remote, base) {
 const NA_VALUE = 'کاربرد ندارد';
 function itemSupportsNA(item) {
   if (!item || item.allowNA === false) return false;
-  return item.type === 'checkbox' || item.type === 'yesno' || item.type === 'rating'
+  return item.type === 'checkbox' || item.type === 'yesno' || item.type === 'rating' || item.type === 'expiry'
     || (item.type === 'select' && !!item.correctValue);
+}
+/* وضعیت «تاریخ اعتبار» (کارت ایمنی، معاینه فنی، بیمه و …):
+   valid = امروز یا بعد از آن | expired = گذشته | empty = ثبت نشده/نامعتبر */
+function expiryStatus(val) {
+  const p = toEnglishDigits(String(val === undefined || val === null ? '' : val)).trim().split('/').map(Number);
+  if (p.length !== 3 || !p.every(n => Number.isFinite(n) && n > 0)) return 'empty';
+  const t = toEnglishDigits(gregorianToJalaliStr(new Date())).split('/').map(Number);
+  const a = p[0] * 10000 + p[1] * 100 + p[2], b = t[0] * 10000 + t[1] * 100 + t[2];
+  return a >= b ? 'valid' : 'expired';
 }
 function scoreRecord(template, answers) {
   let earned = 0, totalWeight = 0, criticalFail = false;
@@ -4299,8 +4312,11 @@ function scoreRecord(template, answers) {
   (template.items || []).forEach(item => {
     const val = answers[item.id];
     let itemEarned = null, itemMax = item.weight || 0;
+    // عنوان گزارش: «گروه — آیتم» (مثلاً «روشنایی جلو — راست — راهنما سالم است؟»)
+    const fullLabel = item.group ? (item.group + ' — ' + item.label) : item.label;
+    let shownVal = val;
     if (val === NA_VALUE && itemSupportsNA(item)) {
-      details.push({ itemId: item.id, label: item.label, value: NA_VALUE, earned: null, max: 0, critical: !!item.critical, na: true });
+      details.push({ itemId: item.id, label: fullLabel, value: NA_VALUE, earned: null, max: 0, critical: !!item.critical, na: true });
       return;
     }
     if (item.type === 'checkbox') {
@@ -4319,11 +4335,17 @@ function scoreRecord(template, answers) {
     } else if (item.type === 'select' && item.correctValue) {
       totalWeight += itemMax;
       itemEarned = val === item.correctValue ? itemMax : 0;
+    } else if (item.type === 'expiry') {
+      totalWeight += itemMax;
+      const st = expiryStatus(val);
+      itemEarned = st === 'valid' ? itemMax : 0;
+      if (item.critical && st !== 'valid') criticalFail = true;
+      if (st === 'expired') shownVal = toEnglishDigits(String(val)) + ' (منقضی‌شده)';
     } else {
       itemEarned = null; // اطلاعاتی (عددی/متنی/انتخابی بدون مقدار صحیح) — در امتیاز محاسبه نمی‌شود
     }
     if (itemEarned !== null) earned += itemEarned;
-    details.push({ itemId: item.id, label: item.label, value: val, earned: itemEarned, max: itemMax, critical: !!item.critical });
+    details.push({ itemId: item.id, label: fullLabel, value: shownVal, earned: itemEarned, max: itemMax, critical: !!item.critical });
   });
   const percent = totalWeight > 0 ? Math.round((earned / totalWeight) * 100) : 100;
   let status;
@@ -7059,6 +7081,52 @@ function printAllLabelsSheet(assets, org, notify) {
   w.document.close();
 }
 
+/* مشخصات تکمیلی تجهیز (خودرو / ماشین‌آلات) — در ستون JSON با نام attrs ذخیره
+   می‌شود تا هنگام اجرای چک‌لیست، آیتم‌های مرتبط خودکار پر شوند. */
+const ASSET_ATTR_DEFS = [
+  { key: 'owner', label: 'مشخصات مالک / پیمانکار', type: 'text' },
+  { key: 'driver', label: 'نام راننده', type: 'text' },
+  { key: 'vehicleType', label: 'نوع خودرو', type: 'text' },
+  { key: 'model', label: 'مدل', type: 'text' },
+  { key: 'plate', label: 'شماره پلاک خودرو', type: 'text' },
+  { key: 'safetyCardExpiry', label: 'تاریخ اعتبار کارت ایمنی راننده', type: 'date' },
+  { key: 'technicalExpiry', label: 'تاریخ اعتبار معاینه فنی', type: 'date' },
+  { key: 'insuranceExpiry', label: 'تاریخ اعتبار بیمه شخص ثالث', type: 'date' },
+];
+
+/** پاسخ‌های پیش‌فرض آیتم‌هایی که به یکی از مشخصات تجهیز گره خورده‌اند */
+function prefillAnswersFromAsset(template, asset) {
+  const out = {};
+  if (!template || !asset || !asset.attrs) return out;
+  (template.items || []).forEach(it => {
+    if (!it.assetField) return;
+    const v = asset.attrs[it.assetField];
+    if (v !== undefined && v !== null && String(v).trim() !== '') out[it.id] = v;
+  });
+  return out;
+}
+
+function AssetAttrsFields({ value, onChange }) {
+  const v = value || {};
+  const set = (k, val) => {
+    const n = Object.assign({}, v, { [k]: val });
+    if (!val) delete n[k];
+    onChange(n);
+  };
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {ASSET_ATTR_DEFS.map(d => (
+        <div key={d.key} className="text-[11px] text-slate-500 space-y-1">
+          <span>{d.label}</span>
+          {d.type === 'date'
+            ? <PersianDatePicker value={v[d.key] || ''} onChange={x => set(d.key, x)} placeholder="انتخاب تاریخ" />
+            : <input className={inputCls} value={v[d.key] || ''} onChange={e => set(d.key, e.target.value)} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AssetForm({ initial, templates, categories, onSave, onCancel }) {
   const [f, setF] = useState(initial || { code: '', name: '', location: '', serial: '', templateId: templates[0] ? templates[0].id : '' });
   return (
@@ -7072,6 +7140,10 @@ function AssetForm({ initial, templates, categories, onSave, onCancel }) {
       <Field label="نام تجهیز"><input className={inputCls} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
       <Field label="محل استقرار"><input className={inputCls} value={f.location} onChange={e => setF({ ...f, location: e.target.value })} /></Field>
       <Field label="شماره سریال"><input className={inputCls} value={f.serial} onChange={e => setF({ ...f, serial: e.target.value })} /></Field>
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+        <p className="text-xs font-bold text-slate-600">مشخصات خودرو / ماشین‌آلات <span className="font-normal text-slate-400">(اختیاری — هنگام اجرای چک‌لیست خودکار بالا می‌آید)</span></p>
+        <AssetAttrsFields value={f.attrs} onChange={a => setF({ ...f, attrs: a })} />
+      </div>
       {!f.templateId && <p className="text-xs text-danger-600">ابتدا یک چک‌لیست بسازید؛ هر تجهیز باید زیرسیستمِ یک چک‌لیست باشد.</p>}
       <div className="flex gap-2 justify-end pt-2">
         <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
@@ -7092,7 +7164,7 @@ function AssetsPage({ goRunner }) {
   const canManage = !!(perms && perms.canManage);
 
   const filtered = data.assets.filter(a =>
-    ((a.code || '') + (a.name || '') + (a.location || '')).toLowerCase().includes(query.toLowerCase())
+    ((a.code || '') + (a.name || '') + (a.location || '') + ((a.attrs && (a.attrs.plate || '') + (a.attrs.driver || '')) || '')).toLowerCase().includes(query.toLowerCase())
   );
 
   const saveAsset = (f) => {
@@ -7171,6 +7243,7 @@ function AssetsPage({ goRunner }) {
             <div className="text-xs text-slate-400 mt-2 space-y-0.5">
               <p>📍 {a.location || 'محل نامشخص'}</p>
               <p>🔧 سریال: {a.serial || '—'}</p>
+              {a.attrs && (a.attrs.plate || a.attrs.driver) && <p>🚗 {a.attrs.plate ? 'پلاک: ' + a.attrs.plate : ''}{a.attrs.plate && a.attrs.driver ? ' · ' : ''}{a.attrs.driver ? 'راننده: ' + a.attrs.driver : ''}</p>}
             </div>
             <div className="flex gap-2 mt-3">
               <button onClick={() => goRunner(a.id)} className="flex-1 text-xs bg-brand-50 text-brand-700 rounded-lg py-2 hover:bg-brand-100">اجرای بازرسی</button>
@@ -7208,7 +7281,118 @@ const ITEM_TYPE_LABELS = {
   numeric: 'عددی',
   text: 'متنی',
   select: 'انتخابی',
+  expiry: 'تاریخ اعتبار (انقضا)',
 };
+
+/* ============================================================
+   قالب آماده: بازرسی خودرو و ماشین‌آلات
+   (برگرفته از برگه‌ی اکسل بازرسی؛ ستون‌های چندسطحی به گروه‌های خوانا تبدیل شده)
+   وزن‌ها پیشنهادی‌اند و از ویرایشگر قابل تغییرند. آیتم‌های حیاتی (ترمز، لاستیک،
+   نور پایین، کپسول، مدارک) گزینه‌ی «کاربرد ندارد» ندارند.
+   ============================================================ */
+function buildVehicleChecklistItems() {
+  let n = 0;
+  const items = [];
+  // g=گروه، label، نوع، وزن، حیاتی؟ (آیتم حیاتی ⇒ «کاربرد ندارد» ممنوع)
+  const add = (group, label, type, weight, critical, extra) => {
+    n += 1;
+    items.push(Object.assign({
+      id: 'veh-' + (n < 10 ? '0' + n : n), type, label, group, weight, critical: !!critical,
+    }, critical ? { allowNA: false } : {}, extra || {}));
+  };
+  const yn = (group, label, w, c) => add(group, label, 'yesno', w, c);
+
+  // مشخصات (اطلاعاتی، بدون امتیاز)
+  const G0 = 'مشخصات خودرو';
+  add(G0, 'مشخصات مالک / پیمانکار', 'text', 0, false, { assetField: 'owner' });
+  add(G0, 'نام راننده', 'text', 0, false, { assetField: 'driver' });
+  add(G0, 'نوع خودرو', 'text', 0, false, { assetField: 'vehicleType' });
+  add(G0, 'مدل', 'text', 0, false, { assetField: 'model' });
+  add(G0, 'شماره پلاک خودرو', 'text', 0, false, { assetField: 'plate' });
+
+  // روشنایی جلو
+  ['راست', 'چپ'].forEach(side => {
+    const g = 'روشنایی جلو — ' + side;
+    yn(g, 'راهنما سالم است؟', 2, false);
+    yn(g, 'چراغ کوچک سالم است؟', 1, false);
+    yn(g, 'نور بالا سالم است؟', 2, false);
+    yn(g, 'نور پایین سالم است؟', 3, true);
+  });
+  // روشنایی عقب
+  yn('روشنایی عقب — چراغ خطر', 'راست سالم است؟', 2, false);
+  yn('روشنایی عقب — چراغ خطر', 'چپ سالم است؟', 2, false);
+  yn('روشنایی عقب — راهنما', 'راست سالم است؟', 2, false);
+  yn('روشنایی عقب — راهنما', 'چپ سالم است؟', 2, false);
+
+  // ترمز
+  yn('ترمز', 'ترمز پایی سالم است؟', 5, true);
+  yn('ترمز', 'ترمز دستی سالم است؟', 5, true);
+  // آینه‌ها
+  yn('آینه‌ها', 'آینه راست سالم است؟', 2, false);
+  yn('آینه‌ها', 'آینه چپ سالم است؟', 2, false);
+  yn('آینه‌ها', 'آینه وسط سالم است؟', 1, false);
+
+  // تجهیزات و سیستم‌ها
+  const GS = 'تجهیزات و سیستم‌ها';
+  yn(GS, 'چراغ دنده عقب سالم است؟', 2, false);
+  yn(GS, 'سنسور دنده عقب سالم است؟', 2, false);
+  yn(GS, 'دوربین دنده عقب سالم است؟', 2, false);
+  yn(GS, 'بوق سالم است؟', 3, false);
+  yn(GS, 'برف‌پاک‌کن سالم است؟', 2, false);
+  yn(GS, 'بخاری سالم است؟', 1, false);
+  yn(GS, 'کولر سالم است؟', 1, false);
+
+  // شیشه‌ها / درب‌ها / لاستیک‌ها
+  ['راننده', 'شاگرد', 'عقب', 'جلو'].forEach(p => yn('شیشه‌ها', 'شیشه ' + p + ' سالم است؟', 1, false));
+  ['راننده', 'شاگرد'].forEach(p => yn('درب‌ها', 'درب ' + p + ' سالم و قفل‌شونده است؟', 1, false));
+  yn('لاستیک‌ها', 'لاستیک‌های عقب سالم و باد مناسب است؟', 5, true);
+  yn('لاستیک‌ها', 'لاستیک‌های جلو سالم و باد مناسب است؟', 5, true);
+  yn('لاستیک‌ها', 'لاستیک زاپاس سالم است؟', 2, false);
+
+  // تجهیزات ایمنی و ابزار
+  const GK = 'تجهیزات ایمنی و ابزار';
+  yn(GK, 'تابلوی خطر (سه‌گوش) موجود است؟', 2, false);
+  yn(GK, 'آچار چرخ موجود است؟', 1, false);
+  yn(GK, 'جک و دسته جک موجود و سالم است؟', 1, false);
+  yn(GK, 'چراغ گردان سالم است؟', 2, false);
+  yn(GK, 'پرچم و میل پرچم موجود است؟', 1, false);
+  yn(GK, 'کپسول اطفاء حریق موجود و سالم است؟', 5, true);
+
+  // وضعیت فنی و ظاهری
+  const GT = 'وضعیت فنی و ظاهری';
+  yn(GT, 'آمپرها (صفحه‌کیلومتر و نشانگرها) سالم است؟', 2, false);
+  yn(GT, 'استارت سالم است؟', 2, false);
+  yn(GT, 'صندلی‌ها سالم و ایمن است؟', 1, false);
+  yn(GT, 'دنده کمکی سالم است؟', 1, false);
+  yn(GT, 'زنجیر چرخ موجود است؟', 1, false);
+  add(GT, 'وضعیت ظاهری ماشین (تمیزی)', 'rating', 2, false, { scaleMax: 5 });
+  yn(GT, 'روغن‌سوزی ندارد؟', 2, false);
+  yn(GT, 'آلودگی زیست‌محیطی وجود ندارد؟', 2, false);
+  yn(GT, 'ریزش روغن، بنزین، گازوئیل و … وجود ندارد؟', 3, false);
+
+  // مدارک و اعتبارنامه‌ها
+  const GD = 'مدارک و اعتبارنامه‌ها';
+  yn(GD, 'گواهینامه رانندگی معتبر و متناسب با خودرو است؟', 5, true);
+  add(GD, 'تاریخ اعتبار کارت ایمنی راننده', 'expiry', 4, true, { assetField: 'safetyCardExpiry' });
+  add(GD, 'تاریخ اعتبار معاینه فنی', 'expiry', 5, true, { assetField: 'technicalExpiry' });
+  add(GD, 'تاریخ اعتبار بیمه شخص ثالث', 'expiry', 5, true, { assetField: 'insuranceExpiry' });
+  return items;
+}
+
+function buildVehicleTemplatePreset(categories, settings) {
+  const cats = categories || [];
+  const cat = cats.find(c => /ماشین|خودرو/.test(c)) || cats[0] || '';
+  return {
+    id: 'tpl-' + Date.now(),
+    name: 'بازرسی خودرو و ماشین‌آلات',
+    category: cat,
+    passThreshold: 80,
+    signers: isSignChainMode(settings) ? 3 : 1,
+    period: 'monthly',
+    archived: false,
+    items: buildVehicleChecklistItems(),
+  };
+}
 
 function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, onCancel }) {
   // قالب تازه همان لحظه شناسه می‌گیرد تا زیرسیستم‌های افزوده‌شده به آن گره بخورند.
@@ -7227,13 +7411,15 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
       }));
   // زیرسیستم‌های تازه که همراه قالب ذخیره می‌شوند (پیش از ذخیره، محلی‌اند)
   const [newAssets, setNewAssets] = useState([]);
-  const [na, setNa] = useState({ code: '', name: '', location: '' });
+  const [na, setNa] = useState({ code: '', name: '', location: '', attrs: {} });
+  const [showNaAttrs, setShowNaAttrs] = useState(false);
+  const [showEditAttrs, setShowEditAttrs] = useState(false);
   const [naError, setNaError] = useState('');
   // ویرایش/حذف زیرسیستم‌های «موجود»: تا زدن «ذخیره قالب» فقط در پیش‌نویس می‌مانند.
   const [assetEdits, setAssetEdits] = useState({});      // id → { code, name, location }
   const [removedIds, setRemovedIds] = useState([]);      // شناسه‌های حذف‌شده
   const [editRowId, setEditRowId] = useState(null);      // ردیفی که در حال ویرایش است
-  const [editRow, setEditRow] = useState({ code: '', name: '', location: '' });
+  const [editRow, setEditRow] = useState({ code: '', name: '', location: '', attrs: {} });
   const [confirmRemoveId, setConfirmRemoveId] = useState(null);
   const [editRowError, setEditRowError] = useState('');
 
@@ -7243,7 +7429,8 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
 
   const startEditLinked = (a) => {
     setEditRowId(a.id); setEditRowError(''); setConfirmRemoveId(null);
-    setEditRow({ code: a.code || '', name: a.name || '', location: a.location || '' });
+    setEditRow({ code: a.code || '', name: a.name || '', location: a.location || '', attrs: Object.assign({}, a.attrs || {}) });
+    setShowEditAttrs(!!(a.attrs && Object.keys(a.attrs).length));
   };
   const commitEditLinked = () => {
     const code = (editRow.code || '').trim(), name = (editRow.name || '').trim();
@@ -7251,7 +7438,7 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
     const dup = newAssets.some(x => x.code.toLowerCase() === code.toLowerCase())
       || liveLinked.some(a => a.id !== editRowId && (a.code || '').toLowerCase() === code.toLowerCase());
     if (dup) { setEditRowError('زیرسیستمی با این کد قبلاً ثبت شده است.'); return; }
-    setAssetEdits(m => Object.assign({}, m, { [editRowId]: { code, name, location: (editRow.location || '').trim() } }));
+    setAssetEdits(m => Object.assign({}, m, { [editRowId]: { code, name, location: (editRow.location || '').trim(), attrs: editRow.attrs || {} } }));
     setEditRowId(null); setEditRowError('');
   };
   const removeLinked = (id) => {
@@ -7261,7 +7448,8 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
   };
   const editNew = (i) => {
     const a = newAssets[i];
-    setNa({ code: a.code, name: a.name, location: a.location || '' });
+    setNa({ code: a.code, name: a.name, location: a.location || '', attrs: Object.assign({}, a.attrs || {}) });
+    setShowNaAttrs(!!(a.attrs && Object.keys(a.attrs).length));
     setNewAssets(list => list.filter((_, j) => j !== i));
     setNaError('');
   };
@@ -7272,13 +7460,15 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
     const dup = newAssets.some(x => x.code.toLowerCase() === code.toLowerCase())
       || liveLinked.some(a => (a.code || '').toLowerCase() === code.toLowerCase());
     if (dup) { setNaError('زیرسیستمی با این کد قبلاً ثبت شده است.'); return; }
-    setNewAssets(list => [...list, { code: code, name: name, location: (na.location || '').trim() }]);
-    setNa({ code: '', name: '', location: '' });
+    setNewAssets(list => [...list, { code: code, name: name, location: (na.location || '').trim(), attrs: na.attrs || {} }]);
+    setNa({ code: '', name: '', location: '', attrs: {} });
+    setShowNaAttrs(false);
     setNaError('');
   };
 
   const addItem = () => {
-    setT({ ...t, items: [...t.items, { id: 'it-' + Date.now(), type: 'checkbox', label: '', weight: 10, critical: false }] });
+    const last = t.items.length ? t.items[t.items.length - 1] : null;
+    setT({ ...t, items: [...t.items, { id: 'it-' + Date.now(), type: 'checkbox', label: '', weight: 10, critical: false, ...(last && last.group ? { group: last.group } : {}) }] });
   };
   const updateItem = (idx, patch) => {
     const items = t.items.slice();
@@ -7349,17 +7539,27 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
               </select>
             </div>
             <div className="flex flex-wrap items-center gap-3">
+              <input className="w-44 border border-slate-300 rounded-lg px-2 py-1 text-xs" placeholder="گروه / بخش (اختیاری)"
+                value={it.group || ''} onChange={e => updateItem(idx, { group: e.target.value })} />
               <label className="text-xs text-slate-500 flex items-center gap-1">وزن
                 <input type="text" inputMode="numeric" dir="ltr" className="w-16 border border-slate-300 rounded-lg px-2 py-1 text-xs" value={toPersianDigits(it.weight)}
                   onChange={e => updateItem(idx, { weight: Number(sanitizeNumericInput(e.target.value, { max: 1000, maxLen: 4 })) || 0 })} />
               </label>
-              {(it.type === 'checkbox' || it.type === 'yesno') && (
+              {(it.type === 'text' || it.type === 'expiry') && (
+                <select className="border border-slate-300 rounded-lg px-2 py-1 text-xs max-w-[15rem]" value={it.assetField || ''}
+                  onChange={e => updateItem(idx, { assetField: e.target.value || undefined })}
+                  title="اگر انتخاب شود، مقدار از مشخصات تجهیز خودکار پر می‌شود و پس از بازرسی به‌روز می‌ماند">
+                  <option value="">پر شدن خودکار: ندارد</option>
+                  {ASSET_ATTR_DEFS.filter(d => (it.type === 'expiry') === (d.type === 'date')).map(d => <option key={d.key} value={d.key}>از مشخصات تجهیز: {d.label}</option>)}
+                </select>
+              )}
+              {(it.type === 'checkbox' || it.type === 'yesno' || it.type === 'expiry') && (
                 <label className="text-xs text-slate-500 flex items-center gap-1.5">
                   <input type="checkbox" checked={!!it.critical} onChange={e => updateItem(idx, { critical: e.target.checked })} />
                   آیتم حیاتی (Critical)
                 </label>
               )}
-              {(it.type === 'checkbox' || it.type === 'yesno' || it.type === 'rating' || (it.type === 'select' && it.correctValue)) && (
+              {(it.type === 'checkbox' || it.type === 'yesno' || it.type === 'rating' || it.type === 'expiry' || (it.type === 'select' && it.correctValue)) && (
                 <label className="text-xs text-slate-500 flex items-center gap-1.5">
                   <input type="checkbox" checked={it.allowNA !== false} onChange={e => updateItem(idx, { allowNA: e.target.checked })} />
                   گزینه‌ی «کاربرد ندارد»
@@ -7405,6 +7605,10 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
                     <input className={inputCls} placeholder="نام زیرسیستم" value={editRow.name} onChange={e => setEditRow({ ...editRow, name: e.target.value })} />
                     <input className={inputCls} placeholder="محل استقرار" value={editRow.location} onChange={e => setEditRow({ ...editRow, location: e.target.value })} />
                   </div>
+                  <button type="button" onClick={() => setShowEditAttrs(v => !v)} className="text-[11px] text-brand-700 hover:underline">
+                    {showEditAttrs ? '▾' : '▸'} مشخصات خودرو / ماشین‌آلات (پلاک، راننده، تاریخ‌های اعتبار …)
+                  </button>
+                  {showEditAttrs && <AssetAttrsFields value={editRow.attrs} onChange={at => setEditRow({ ...editRow, attrs: at })} />}
                   {editRowError && <p className="text-xs text-danger-600">{editRowError}</p>}
                   <div className="flex gap-2 justify-end">
                     <button type="button" onClick={() => { setEditRowId(null); setEditRowError(''); }} className="text-xs text-slate-600 hover:bg-slate-100 rounded-lg px-3 py-1.5">انصراف</button>
@@ -7413,7 +7617,7 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
                 </li>
               ) : (
                 <li key={a.id} className={"text-xs bg-white border rounded-lg px-3 py-1.5 flex items-center justify-between gap-2 " + (assetEdits[a.id] ? "border-brand-300" : "border-slate-200")}>
-                  <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'})</span></span>
+                  <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'}{a.attrs && a.attrs.plate ? ' · پلاک ' + a.attrs.plate : ''})</span></span>
                   {confirmRemoveId === a.id ? (
                     <span className="flex items-center gap-1.5">
                       <span className="text-danger-600">حذف شود؟</span>
@@ -7435,7 +7639,7 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
           <ul className="space-y-1">
             {newAssets.map((a, i) => (
               <li key={i} className="text-xs bg-brand-50 border border-brand-200 rounded-lg px-3 py-1.5 flex items-center justify-between">
-                <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'})</span></span>
+                <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'}{a.attrs && a.attrs.plate ? ' · پلاک ' + a.attrs.plate : ''})</span></span>
                 <span className="flex items-center gap-1">
                   <button type="button" onClick={() => editNew(i)} className="text-slate-600 hover:bg-white rounded px-2 py-1">ویرایش</button>
                   <button type="button" onClick={() => setNewAssets(list => list.filter((_, j) => j !== i))}
@@ -7453,6 +7657,10 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
           <button type="button" onClick={addSubsystem}
             className="text-xs bg-brand-50 text-brand-700 rounded-lg px-3 py-2.5 hover:bg-brand-100 border border-brand-200">+ افزودن زیرسیستم</button>
         </div>
+        <button type="button" onClick={() => setShowNaAttrs(v => !v)} className="text-[11px] text-brand-700 hover:underline">
+          {showNaAttrs ? '▾' : '▸'} مشخصات خودرو / ماشین‌آلات (پلاک، راننده، تاریخ‌های اعتبار …)
+        </button>
+        {showNaAttrs && <AssetAttrsFields value={na.attrs} onChange={at => setNa({ ...na, attrs: at })} />}
         {naError && <p className="text-xs text-danger-600">{naError}</p>}
         {(assetEdits && (Object.keys(assetEdits).length > 0 || removedIds.length > 0)) && (
           <p className="text-[11px] text-warn-700">تغییرات زیرسیستم‌ها پس از زدن «ذخیره قالب» اعمال می‌شود.</p>
@@ -7488,9 +7696,9 @@ function TemplatesPage() {
     delete tpl._newAssets; delete tpl._assetEdits; delete tpl._removedAssetIds;
     if (!tpl.id) tpl.id = 'tpl-' + Date.now();
     update(d => {
-      if (editing && editing.id) {
-        const idx = d.templates.findIndex(x => x.id === editing.id);
-        d.templates[idx] = { ...d.templates[idx], ...tpl };
+      const existingIdx = (editing && editing.id) ? d.templates.findIndex(x => x.id === editing.id) : -1;
+      if (existingIdx > -1) {
+        d.templates[existingIdx] = { ...d.templates[existingIdx], ...tpl };
       } else {
         d.templates.push({ archived: false, ...tpl });
       }
@@ -7500,6 +7708,9 @@ function TemplatesPage() {
         if (removedIds.includes(id)) return;
         const ai = d.assets.findIndex(x => x.id === id);
         if (ai > -1) d.assets[ai] = { ...d.assets[ai], code: assetEdits[id].code, name: assetEdits[id].name, location: assetEdits[id].location || '' };
+        if (assetEdits[id].attrs !== undefined) {
+          if (Object.keys(assetEdits[id].attrs).length) d.assets[ai].attrs = assetEdits[id].attrs; else delete d.assets[ai].attrs;
+        }
       });
       // حذف زیرسیستم‌ها (سوابق قبلی حفظ می‌شوند)
       if (removedIds.length) d.assets = d.assets.filter(x => !removedIds.includes(x.id));
@@ -7508,6 +7719,7 @@ function TemplatesPage() {
           id: 'asset-' + Date.now() + '-' + i,
           code: fa.code, name: fa.name, location: fa.location || '',
           serial: '', templateId: tplId, category: tpl.category || '',
+          ...(fa.attrs && Object.keys(fa.attrs).length ? { attrs: fa.attrs } : {}),
         });
       });
     });
@@ -7534,7 +7746,11 @@ function TemplatesPage() {
           <p className="text-sm text-slate-500">تعریف آیتم‌های بازرسی، وزن‌دهی و موارد حیاتی</p>
         </div>
         {canManage
-          ? <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ قالب جدید</button>
+          ? <div className="flex flex-wrap gap-2">
+              <button onClick={() => { setEditing(buildVehicleTemplatePreset(data.categories, data.settings)); setShowForm(true); }}
+                className="px-4 py-2.5 rounded-xl bg-white border border-brand-200 hover:bg-brand-50 text-brand-700 text-sm font-medium">🚚 قالب آماده: خودرو و ماشین‌آلات</button>
+              <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ قالب جدید</button>
+            </div>
           : <span className="text-xs text-slate-400 bg-slate-100 rounded-xl px-3 py-2.5">حالت فقط‌خواندنی — برای ساخت یا ویرایش قالب به دسترسی مدیر نیاز است</span>}
       </div>
 
@@ -7567,8 +7783,8 @@ function TemplatesPage() {
         ))}
       </div>
 
-      <Modal open={showForm} onClose={() => setShowForm(false)} wide title={editing ? 'ویرایش قالب' : 'قالب جدید'}>
-        <TemplateEditor initial={editing} categories={data.categories} settings={data.settings}
+      <Modal open={showForm} onClose={() => setShowForm(false)} wide title={editing ? (data.templates.some(x => x.id === editing.id) ? 'ویرایش قالب' : 'قالب جدید — از روی قالب آماده') : 'قالب جدید'}>
+        <TemplateEditor key={editing ? editing.id : 'new'} initial={editing} categories={data.categories} settings={data.settings}
           linkedAssets={editing ? data.assets.filter(a => a.templateId === editing.id) : []}
           onSave={saveTemplate} onCancel={() => setShowForm(false)} />
       </Modal>
@@ -7604,6 +7820,16 @@ function ChecklistItemInput({ item, value, onChange }) {
   );
 }
 function ChecklistItemInputBase({ item, value, onChange }) {
+  if (item.type === 'expiry') {
+    const st = value ? expiryStatus(value) : 'empty';
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="w-44"><PersianDatePicker value={value || ''} onChange={onChange} placeholder="تاریخ اعتبار" /></div>
+        {st === 'valid' && <span className="text-xs text-ok-700">✓ معتبر</span>}
+        {st === 'expired' && <span className="text-xs text-danger-600 font-medium">⚠ منقضی‌شده</span>}
+      </div>
+    );
+  }
   if (item.type === 'checkbox') {
     return (
       <label className="flex items-center gap-2.5 cursor-pointer">
@@ -7945,7 +8171,8 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
   const [onsitePadSlot, setOnsitePadSlot] = useState(null);
 
   useEffect(() => {
-    setAnswers({}); setSignatures({});
+    // آیتم‌های گره‌خورده به مشخصات تجهیز (پلاک، راننده، تاریخ‌های اعتبار …) خودکار پر می‌شوند
+    setAnswers(prefillAnswersFromAsset(template, asset)); setSignatures({});
     setChainSel({}); setChainNotes({}); setChainMode({});
     setChainOnsiteSigs({}); setOnsitePadSlot(null);
     setPhotos([]);
@@ -8161,6 +8388,24 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
 
     update(d => {
       d.records.unshift(finalRecord);
+      // مشخصات به‌روز (مثلاً بیمه‌ی تمدیدشده یا راننده‌ی جدید) به بانک مشخصات تجهیز برمی‌گردد
+      {
+        const linked = (template.items || []).filter(it => it.assetField);
+        if (linked.length) {
+          const ai = d.assets.findIndex(x => x.id === asset.id);
+          if (ai > -1) {
+            const attrs = Object.assign({}, d.assets[ai].attrs || {});
+            let changed = false;
+            linked.forEach(it => {
+              const v = answers[it.id];
+              if (typeof v === 'string' && v.trim() && v !== NA_VALUE && attrs[it.assetField] !== v.trim()) {
+                attrs[it.assetField] = v.trim(); changed = true;
+              }
+            });
+            if (changed) d.assets[ai] = Object.assign({}, d.assets[ai], { attrs });
+          }
+        }
+      }
       // اقدام اصلاحی خودکار: بازرسی «ناموفق (حیاتی)» بی‌پاسخ نمی‌ماند؛ همان لحظه
       // یک دستورکار باز می‌شود و در صفحه‌ی «اقدام اصلاحی» تا رفع مشکل پیگیری می‌شود.
       if (result.criticalFail) {
@@ -8259,9 +8504,47 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         </div>
       </div>
 
+      {(() => {
+        const attrs = (asset && asset.attrs) || {};
+        const rows = ASSET_ATTR_DEFS.filter(d => attrs[d.key]);
+        const wantsAttrs = (template.items || []).some(i => i.assetField);
+        if (!rows.length) {
+          return wantsAttrs ? (
+            <div className="rounded-2xl border border-warn-500/30 bg-warn-50 p-3 text-xs text-warn-700">
+              مشخصات این تجهیز (پلاک، راننده، تاریخ‌های اعتبار …) هنوز ثبت نشده است؛ از صفحه «تجهیزات» یا «قالب‌های چک‌لیست» ثبت کنید تا دفعه‌ی بعد خودکار بالا بیاید. فعلاً می‌توانید در همین فرم وارد کنید و پس از ثبت بازرسی ذخیره می‌شود.
+            </div>
+          ) : null;
+        }
+        return (
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-2">
+            <h3 className="font-bold text-slate-800 text-sm">مشخصات تجهیز</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-1.5 text-xs">
+              {rows.map(d => {
+                const st = d.type === 'date' ? expiryStatus(attrs[d.key]) : '';
+                return (
+                  <p key={d.key} className="flex items-center justify-between gap-2 border-b border-slate-100 pb-1">
+                    <span className="text-slate-500">{d.label}</span>
+                    <span className="font-medium text-slate-800 flex items-center gap-1.5">
+                      {toPersianDigits(String(attrs[d.key]))}
+                      {st === 'valid' && <span className="text-ok-700">✓ معتبر</span>}
+                      {st === 'expired' && <span className="text-danger-600">⚠ منقضی‌شده</span>}
+                    </span>
+                  </p>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
         <h3 className="font-bold text-slate-800">آیتم‌های بازرسی</h3>
-        {template.items.map(item => (
+        {template.items.map((item, ix) => {
+          const prevGroup = ix > 0 ? (template.items[ix - 1].group || '') : '';
+          const showGroup = !!item.group && item.group !== prevGroup;
+          return (
+            <Fragment key={item.id}>
+              {showGroup && <h4 className="text-xs font-bold text-brand-700 bg-brand-50 rounded-lg px-3 py-1.5 mt-2">{item.group}</h4>}
           <div key={item.id} className="border-b border-slate-100 pb-4 last:border-0 last:pb-0">
             <div className="flex items-start justify-between mb-2">
               <p className="text-sm font-medium text-slate-700">{item.label}
@@ -8271,7 +8554,9 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
             </div>
             <ChecklistItemInput item={item} value={answers[item.id]} onChange={v => setAnswers(a => ({ ...a, [item.id]: v }))} />
           </div>
-        ))}
+            </Fragment>
+          );
+        })}
         <Field label="یادداشت‌های تکمیلی بازرسی"><textarea className={inputCls} rows={2} value={notes} onChange={e => setNotes(e.target.value)} /></Field>
 
         <div className="border border-slate-200 rounded-xl p-3 bg-slate-50 space-y-2.5">
@@ -9958,7 +10243,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.4
+ *  نسخه: 8.5
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -10004,6 +10289,10 @@ const APPS_SCRIPT_CODE = `/**
  *      امتیاز حذف می‌شود. ساختار شیت‌ها تغییر نکرد (details/items همچنان JSON‌اند و
  *      فیلدهای na و allowNA بی‌دست‌کاری ذخیره می‌شوند)؛ فقط اعلان ایمیل حیاتی تعداد
  *      آیتم‌های «کاربرد ندارد» را هم می‌نویسد.
+ *
+ *  ۱۱. مشخصات تکمیلی تجهیز (نسخه ۸.۵): ستون JSON تازه‌ی «attrs» در انتهای شیت assets
+ *      (پلاک، راننده، مالک/پیمانکار، نوع و مدل خودرو، تاریخ‌های اعتبار کارت ایمنی /
+ *      معاینه فنی / بیمه). افزودن ستون در انتها امن است و هدر شیت خودکار هم‌تراز می‌شود.
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -10035,7 +10324,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.4";
+var SERVER_VERSION = "8.5";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -10084,7 +10373,7 @@ var SCHEMA = {
   },
   assets: {
     sheet: "assets",
-    cols: ["id", "code", "name", "location", "serial", "templateId", "category"]
+    cols: ["id", "code", "name", "location", "serial", "templateId", "category", "attrs"]
   },
   assignments: {
     sheet: "assignments",
@@ -10125,6 +10414,8 @@ var COL_TYPES = {
   // correctives
   openedAt: "n", closedAt: "n",
   signRequest: "j",
+  // assets
+  attrs: "j",
   // categories
   order: "n",
   // users
@@ -12315,7 +12606,7 @@ function buildLegacySnapshot(ss) {
   });
 
   var assets = readTable(ss, "assets").filter(function (a) { return !a.deleted; }).map(function (a) {
-    return { id: a.id, code: a.code, name: a.name, location: a.location, serial: a.serial, templateId: a.templateId, category: a.category || "" };
+    return { id: a.id, code: a.code, name: a.name, location: a.location, serial: a.serial, templateId: a.templateId, category: a.category || "", attrs: a.attrs || undefined };
   });
 
   var assignments = readTable(ss, "assignments").filter(function (a) { return !a.deleted; });
