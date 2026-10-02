@@ -4284,12 +4284,25 @@ function snapshotToLocal(remote, base) {
    ۳. موتور امتیازدهی چک‌لیست
    ============================================================ */
 /* @core-start: scoring */
+/* مقدار ویژه‌ی «کاربرد ندارد»: آیتمی که برای این تجهیز موضوعیت ندارد (مثلاً
+   خودرو اصلاً سنسور ندارد). چنین آیتمی از مخرج امتیاز حذف می‌شود، آیتم حیاتی
+   هم با آن «رد» حساب نمی‌شود و در گزارش به‌صورت «کاربرد ندارد» می‌آید. */
+const NA_VALUE = 'کاربرد ندارد';
+function itemSupportsNA(item) {
+  if (!item || item.allowNA === false) return false;
+  return item.type === 'checkbox' || item.type === 'yesno' || item.type === 'rating'
+    || (item.type === 'select' && !!item.correctValue);
+}
 function scoreRecord(template, answers) {
   let earned = 0, totalWeight = 0, criticalFail = false;
   const details = [];
   (template.items || []).forEach(item => {
     const val = answers[item.id];
     let itemEarned = null, itemMax = item.weight || 0;
+    if (val === NA_VALUE && itemSupportsNA(item)) {
+      details.push({ itemId: item.id, label: item.label, value: NA_VALUE, earned: null, max: 0, critical: !!item.critical, na: true });
+      return;
+    }
     if (item.type === 'checkbox') {
       totalWeight += itemMax;
       itemEarned = val ? itemMax : 0;
@@ -7216,12 +7229,48 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
   const [newAssets, setNewAssets] = useState([]);
   const [na, setNa] = useState({ code: '', name: '', location: '' });
   const [naError, setNaError] = useState('');
+  // ویرایش/حذف زیرسیستم‌های «موجود»: تا زدن «ذخیره قالب» فقط در پیش‌نویس می‌مانند.
+  const [assetEdits, setAssetEdits] = useState({});      // id → { code, name, location }
+  const [removedIds, setRemovedIds] = useState([]);      // شناسه‌های حذف‌شده
+  const [editRowId, setEditRowId] = useState(null);      // ردیفی که در حال ویرایش است
+  const [editRow, setEditRow] = useState({ code: '', name: '', location: '' });
+  const [confirmRemoveId, setConfirmRemoveId] = useState(null);
+  const [editRowError, setEditRowError] = useState('');
+
+  const liveLinked = (linkedAssets || [])
+    .filter(a => !removedIds.includes(a.id))
+    .map(a => assetEdits[a.id] ? Object.assign({}, a, assetEdits[a.id]) : a);
+
+  const startEditLinked = (a) => {
+    setEditRowId(a.id); setEditRowError(''); setConfirmRemoveId(null);
+    setEditRow({ code: a.code || '', name: a.name || '', location: a.location || '' });
+  };
+  const commitEditLinked = () => {
+    const code = (editRow.code || '').trim(), name = (editRow.name || '').trim();
+    if (!code || !name) { setEditRowError('کد و نام زیرسیستم الزامی است.'); return; }
+    const dup = newAssets.some(x => x.code.toLowerCase() === code.toLowerCase())
+      || liveLinked.some(a => a.id !== editRowId && (a.code || '').toLowerCase() === code.toLowerCase());
+    if (dup) { setEditRowError('زیرسیستمی با این کد قبلاً ثبت شده است.'); return; }
+    setAssetEdits(m => Object.assign({}, m, { [editRowId]: { code, name, location: (editRow.location || '').trim() } }));
+    setEditRowId(null); setEditRowError('');
+  };
+  const removeLinked = (id) => {
+    setRemovedIds(list => list.includes(id) ? list : [...list, id]);
+    setConfirmRemoveId(null);
+    if (editRowId === id) setEditRowId(null);
+  };
+  const editNew = (i) => {
+    const a = newAssets[i];
+    setNa({ code: a.code, name: a.name, location: a.location || '' });
+    setNewAssets(list => list.filter((_, j) => j !== i));
+    setNaError('');
+  };
 
   const addSubsystem = () => {
     const code = (na.code || '').trim(), name = (na.name || '').trim();
     if (!code || !name) { setNaError('کد و نام زیرسیستم الزامی است.'); return; }
     const dup = newAssets.some(x => x.code.toLowerCase() === code.toLowerCase())
-      || (linkedAssets || []).some(a => (a.code || '').toLowerCase() === code.toLowerCase());
+      || liveLinked.some(a => (a.code || '').toLowerCase() === code.toLowerCase());
     if (dup) { setNaError('زیرسیستمی با این کد قبلاً ثبت شده است.'); return; }
     setNewAssets(list => [...list, { code: code, name: name, location: (na.location || '').trim() }]);
     setNa({ code: '', name: '', location: '' });
@@ -7310,6 +7359,12 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
                   آیتم حیاتی (Critical)
                 </label>
               )}
+              {(it.type === 'checkbox' || it.type === 'yesno' || it.type === 'rating' || (it.type === 'select' && it.correctValue)) && (
+                <label className="text-xs text-slate-500 flex items-center gap-1.5">
+                  <input type="checkbox" checked={it.allowNA !== false} onChange={e => updateItem(idx, { allowNA: e.target.checked })} />
+                  گزینه‌ی «کاربرد ندارد»
+                </label>
+              )}
               {it.type === 'rating' && (
                 <label className="text-xs text-slate-500 flex items-center gap-1">حداکثر امتیاز
                   <input type="text" inputMode="numeric" dir="ltr" className="w-14 border border-slate-300 rounded-lg px-2 py-1 text-xs" value={toPersianDigits(it.scaleMax || 5)}
@@ -7337,16 +7392,42 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
           </p>
         </div>
 
-        {(linkedAssets || []).length === 0 && newAssets.length === 0 && (
+        {liveLinked.length === 0 && newAssets.length === 0 && (
           <p className="text-xs text-slate-400">هنوز زیرسیستمی برای این چک‌لیست ثبت نشده است.</p>
         )}
-        {(linkedAssets || []).length > 0 && (
+        {liveLinked.length > 0 && (
           <ul className="space-y-1">
-            {linkedAssets.map(a => (
-              <li key={a.id} className="text-xs bg-white border border-slate-200 rounded-lg px-3 py-1.5 flex items-center justify-between">
-                <span className="text-slate-700"><b>{a.code}</b> — {a.name}</span>
-                <span className="text-slate-400">{a.location || ''}</span>
-              </li>
+            {liveLinked.map(a => (
+              editRowId === a.id ? (
+                <li key={a.id} className="bg-white border border-brand-300 rounded-lg p-2 space-y-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input className={inputCls} placeholder="کد" value={editRow.code} onChange={e => setEditRow({ ...editRow, code: e.target.value })} />
+                    <input className={inputCls} placeholder="نام زیرسیستم" value={editRow.name} onChange={e => setEditRow({ ...editRow, name: e.target.value })} />
+                    <input className={inputCls} placeholder="محل استقرار" value={editRow.location} onChange={e => setEditRow({ ...editRow, location: e.target.value })} />
+                  </div>
+                  {editRowError && <p className="text-xs text-danger-600">{editRowError}</p>}
+                  <div className="flex gap-2 justify-end">
+                    <button type="button" onClick={() => { setEditRowId(null); setEditRowError(''); }} className="text-xs text-slate-600 hover:bg-slate-100 rounded-lg px-3 py-1.5">انصراف</button>
+                    <button type="button" onClick={commitEditLinked} className="text-xs bg-brand-600 text-white hover:bg-brand-700 rounded-lg px-3 py-1.5">اعمال</button>
+                  </div>
+                </li>
+              ) : (
+                <li key={a.id} className={"text-xs bg-white border rounded-lg px-3 py-1.5 flex items-center justify-between gap-2 " + (assetEdits[a.id] ? "border-brand-300" : "border-slate-200")}>
+                  <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'})</span></span>
+                  {confirmRemoveId === a.id ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-danger-600">حذف شود؟</span>
+                      <button type="button" onClick={() => removeLinked(a.id)} className="bg-danger-50 text-danger-700 hover:bg-danger-100 rounded px-2 py-1">بله</button>
+                      <button type="button" onClick={() => setConfirmRemoveId(null)} className="text-slate-600 hover:bg-slate-100 rounded px-2 py-1">خیر</button>
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1">
+                      <button type="button" onClick={() => startEditLinked(a)} className="text-slate-600 hover:bg-slate-100 rounded px-2 py-1">ویرایش</button>
+                      <button type="button" onClick={() => setConfirmRemoveId(a.id)} className="text-danger-600 hover:bg-danger-50 rounded px-2 py-1">حذف</button>
+                    </span>
+                  )}
+                </li>
+              )
             ))}
           </ul>
         )}
@@ -7355,8 +7436,11 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
             {newAssets.map((a, i) => (
               <li key={i} className="text-xs bg-brand-50 border border-brand-200 rounded-lg px-3 py-1.5 flex items-center justify-between">
                 <span className="text-slate-700"><b>{a.code}</b> — {a.name} <span className="text-slate-400">({a.location || 'بدون محل'})</span></span>
-                <button type="button" onClick={() => setNewAssets(list => list.filter((_, j) => j !== i))}
-                  className="text-danger-600 hover:bg-danger-50 rounded px-1.5">✕</button>
+                <span className="flex items-center gap-1">
+                  <button type="button" onClick={() => editNew(i)} className="text-slate-600 hover:bg-white rounded px-2 py-1">ویرایش</button>
+                  <button type="button" onClick={() => setNewAssets(list => list.filter((_, j) => j !== i))}
+                    className="text-danger-600 hover:bg-danger-50 rounded px-2 py-1">حذف</button>
+                </span>
               </li>
             ))}
           </ul>
@@ -7370,14 +7454,14 @@ function TemplateEditor({ initial, categories, settings, linkedAssets, onSave, o
             className="text-xs bg-brand-50 text-brand-700 rounded-lg px-3 py-2.5 hover:bg-brand-100 border border-brand-200">+ افزودن زیرسیستم</button>
         </div>
         {naError && <p className="text-xs text-danger-600">{naError}</p>}
-        {(linkedAssets || []).length > 0 && (
-          <p className="text-[11px] text-slate-400">برای ویرایش یا جابه‌جایی زیرسیستم‌های موجود، از صفحه «تجهیزات» استفاده کنید.</p>
+        {(assetEdits && (Object.keys(assetEdits).length > 0 || removedIds.length > 0)) && (
+          <p className="text-[11px] text-warn-700">تغییرات زیرسیستم‌ها پس از زدن «ذخیره قالب» اعمال می‌شود.</p>
         )}
       </div>
 
       <div className="flex gap-2 justify-end pt-2">
         <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
-        <button onClick={() => t.name && onSave(Object.assign({}, t, { _newAssets: newAssets }))}
+        <button onClick={() => t.name && onSave(Object.assign({}, t, { _newAssets: newAssets, _assetEdits: assetEdits, _removedAssetIds: removedIds }))}
           className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره قالب</button>
       </div>
     </div>
@@ -7398,8 +7482,10 @@ function TemplatesPage() {
     // زیرسیستم‌های تازه از بدنه‌ی قالب جدا می‌شوند: آن‌ها موجودیت «تجهیز» هستند،
     // نه فیلد قالب — فقط پیوندشان (templateId) با قالب ذخیره می‌شود.
     const freshAssets = Array.isArray(t._newAssets) ? t._newAssets : [];
+    const assetEdits = (t._assetEdits && typeof t._assetEdits === 'object') ? t._assetEdits : {};
+    const removedIds = Array.isArray(t._removedAssetIds) ? t._removedAssetIds : [];
     const tpl = { ...t };
-    delete tpl._newAssets;
+    delete tpl._newAssets; delete tpl._assetEdits; delete tpl._removedAssetIds;
     if (!tpl.id) tpl.id = 'tpl-' + Date.now();
     update(d => {
       if (editing && editing.id) {
@@ -7409,6 +7495,14 @@ function TemplatesPage() {
         d.templates.push({ archived: false, ...tpl });
       }
       const tplId = tpl.id;
+      // ویرایش زیرسیستم‌های موجود
+      Object.keys(assetEdits).forEach(id => {
+        if (removedIds.includes(id)) return;
+        const ai = d.assets.findIndex(x => x.id === id);
+        if (ai > -1) d.assets[ai] = { ...d.assets[ai], code: assetEdits[id].code, name: assetEdits[id].name, location: assetEdits[id].location || '' };
+      });
+      // حذف زیرسیستم‌ها (سوابق قبلی حفظ می‌شوند)
+      if (removedIds.length) d.assets = d.assets.filter(x => !removedIds.includes(x.id));
       freshAssets.forEach((fa, i) => {
         d.assets.push({
           id: 'asset-' + Date.now() + '-' + i,
@@ -7491,6 +7585,25 @@ function TemplatesPage() {
    ۱۳. موتور اجرای چک‌لیست (Runner)
    ============================================================ */
 function ChecklistItemInput({ item, value, onChange }) {
+  const naOk = itemSupportsNA(item);
+  const isNa = naOk && value === NA_VALUE;
+  if (!naOk) return <ChecklistItemInputBase item={item} value={value} onChange={onChange} />;
+  return (
+    <div className="space-y-2">
+      <div className={"flex flex-wrap items-center gap-3 " + (isNa ? "opacity-40" : "")}>
+        <ChecklistItemInputBase item={item} value={isNa ? undefined : value} onChange={onChange} />
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => onChange(isNa ? undefined : NA_VALUE)}
+          className={"px-3 py-1.5 rounded-xl text-xs border " + (isNa ? "bg-slate-700 border-slate-700 text-white" : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
+          {isNa ? '✓ ' : ''}{NA_VALUE}
+        </button>
+        {isNa && <span className="text-[11px] text-slate-400">این آیتم از محاسبه‌ی امتیاز حذف شد.</span>}
+      </div>
+    </div>
+  );
+}
+function ChecklistItemInputBase({ item, value, onChange }) {
   if (item.type === 'checkbox') {
     return (
       <label className="flex items-center gap-2.5 cursor-pointer">
@@ -8056,7 +8169,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
           recordId: finalRecord.id,
           assetId: asset.id, assetCode: asset.code,
           templateName: template.name,
-          reason: 'بازرسی ناموفق (حیاتی) — ' + (result.details.filter(x => x.critical && (x.earned === null || x.earned === 0)).map(x => x.label).join('؛ ') || 'رد آیتم حیاتی'),
+          reason: 'بازرسی ناموفق (حیاتی) — ' + (result.details.filter(x => x.critical && !x.na && (x.earned === null || x.earned === 0)).map(x => x.label).join('؛ ') || 'رد آیتم حیاتی'),
           assignedToUserId: '', assignedToName: '',
           status: 'open', note: '',
           openedAt: now.getTime(), closedAt: null,
@@ -8326,7 +8439,7 @@ function recordReportHtml(rec, org) {
     <tr>
       <td>${escapeHtml(d.label)}</td>
       <td>${typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value === undefined || d.value === null || d.value === '' ? '—' : escapeHtml(toPersianDigits(String(d.value))))}</td>
-      <td>${d.max > 0 ? toPersianDigits(Math.round(d.earned || 0)) + ' از ' + toPersianDigits(d.max) : 'اطلاعاتی'}</td>
+      <td>${d.na ? 'کاربرد ندارد' : (d.max > 0 ? toPersianDigits(Math.round(d.earned || 0)) + ' از ' + toPersianDigits(d.max) : 'اطلاعاتی')}</td>
       <td>${d.critical ? 'بله' : 'خیر'}</td>
     </tr>`).join('');
   return `
@@ -8474,7 +8587,7 @@ async function exportRecordsXlsx(records, org, notify) {
       detailRows.push({
         'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': d.label,
         'پاسخ': typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value ?? ''),
-        'امتیاز کسب‌شده': d.earned ?? '', 'حداکثر امتیاز': d.max, 'حیاتی': d.critical ? 'بله' : 'خیر',
+        'امتیاز کسب‌شده': d.na ? 'کاربرد ندارد' : (d.earned ?? ''), 'حداکثر امتیاز': d.na ? '' : d.max, 'حیاتی': d.critical ? 'بله' : 'خیر',
       });
     });
     if (r.notes) detailRows.push({ 'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': 'یادداشت', 'پاسخ': r.notes, 'امتیاز کسب‌شده': '', 'حداکثر امتیاز': '', 'حیاتی': '' });
@@ -9845,7 +9958,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.3
+ *  نسخه: 8.4
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -9885,6 +9998,12 @@ const APPS_SCRIPT_CODE = `/**
  *          op بعدیِ کلاینت با ساعت دستگاه، کهنه‌تر تلقی و رد می‌شد.
  *      د) سقف نرخ پیش‌فرض به ۲۴۰ در دقیقه رفت (چند دستگاه هم‌زمان یک سبد
  *          مشترک دارند).
+ *
+ *  ۱۰. پشتیبانی از «کاربرد ندارد» (نسخه ۸.۴): آیتمی که برای تجهیز موضوعیت ندارد
+ *      (مثلاً خودرو سنسور ندارد) در کلاینت با مقدار «کاربرد ندارد» ثبت می‌شود و از
+ *      امتیاز حذف می‌شود. ساختار شیت‌ها تغییر نکرد (details/items همچنان JSON‌اند و
+ *      فیلدهای na و allowNA بی‌دست‌کاری ذخیره می‌شوند)؛ فقط اعلان ایمیل حیاتی تعداد
+ *      آیتم‌های «کاربرد ندارد» را هم می‌نویسد.
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -9916,7 +10035,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.3";
+var SERVER_VERSION = "8.4";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -11948,6 +12067,16 @@ function handleSignatureGet(ss, body) {
   } catch (e) { return err("فایل امضا یافت نشد."); }
 }
 
+/** تعداد آیتم‌های «کاربرد ندارد» در details یک رکورد (برای اعلان ایمیل). */
+function countNaItems_(rec) {
+  var list = rec && rec.details;
+  if (typeof list === "string") list = safeJsonParse(list, []);
+  if (!Array.isArray(list)) return 0;
+  var n = 0;
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].na) n++;
+  return n;
+}
+
 function notifyCriticalFailure(rec, fileUrl) {
   var adminEmail = prop("ADMIN_EMAIL", "");
   if (!adminEmail) {
@@ -11961,6 +12090,7 @@ function notifyCriticalFailure(rec, fileUrl) {
     "تجهیز: " + (rec.assetCode || "—") + "\\n" +
     "بازرس: " + (rec.inspectorName || rec.inspector || "—") + "\\n" +
     "درصد: " + (rec.percent || 0) + "%\\n" +
+    (countNaItems_(rec) ? "آیتم «کاربرد ندارد»: " + countNaItems_(rec) + "\\n" : "") +
     "زمان: " + toJalaliDateTime(rec.completedAt || new Date()) + "\\n" +
     (fileUrl ? "لینک فایل: " + fileUrl : "");
   MailApp.sendEmail(adminEmail, subject, bodyTxt);
