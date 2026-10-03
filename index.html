@@ -4307,6 +4307,14 @@ function expiryStatus(val) {
   const a = p[0] * 10000 + p[1] * 100 + p[2], b = t[0] * 10000 + t[1] * 100 + t[2];
   return a >= b ? 'valid' : 'expired';
 }
+/* آیا پاسخ این آیتم «عدم انطباق» است؟ (برای باز شدن کادر توضیح) */
+function itemNonConforming(item, val) {
+  if (!item || val === undefined || val === null || val === '' || val === NA_VALUE) return false;
+  if (item.type === 'yesno') return val === 'خیر';
+  if (item.type === 'select' && item.correctValue) return val !== item.correctValue;
+  if (item.type === 'expiry') return expiryStatus(val) === 'expired';
+  return false;
+}
 function scoreRecord(template, answers) {
   let earned = 0, totalWeight = 0, criticalFail = false;
   const details = [];
@@ -4346,7 +4354,11 @@ function scoreRecord(template, answers) {
       itemEarned = null; // اطلاعاتی (عددی/متنی/انتخابی بدون مقدار صحیح) — در امتیاز محاسبه نمی‌شود
     }
     if (itemEarned !== null) earned += itemEarned;
-    details.push({ itemId: item.id, label: fullLabel, value: shownVal, earned: itemEarned, max: itemMax, critical: !!item.critical });
+    const noteTxt = String(answers[item.id + '__note'] || '').trim();
+    details.push(Object.assign(
+      { itemId: item.id, label: fullLabel, value: shownVal, earned: itemEarned, max: itemMax, critical: !!item.critical },
+      (noteTxt && itemNonConforming(item, val)) ? { note: noteTxt.slice(0, 500) } : {}
+    ));
   });
   const percent = totalWeight > 0 ? Math.round((earned / totalWeight) * 100) : 100;
   let status;
@@ -8864,7 +8876,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
           recordId: finalRecord.id,
           assetId: asset.id, assetCode: asset.code,
           templateName: template.name,
-          reason: 'بازرسی ناموفق (حیاتی) — ' + (result.details.filter(x => x.critical && !x.na && (x.earned === null || x.earned === 0)).map(x => x.label).join('؛ ') || 'رد آیتم حیاتی'),
+          reason: 'بازرسی ناموفق (حیاتی) — ' + (result.details.filter(x => x.critical && !x.na && (x.earned === null || x.earned === 0)).map(x => x.note ? x.label + ' (' + x.note + ')' : x.label).join('؛ ') || 'رد آیتم حیاتی'),
           assignedToUserId: '', assignedToName: '',
           status: 'open', note: '',
           openedAt: now.getTime(), closedAt: null,
@@ -9003,6 +9015,15 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
               {item.weight > 0 && <span className="text-xs text-slate-400 shrink-0">وزن {toPersianDigits(item.weight)}</span>}
             </div>
             <ChecklistItemInput item={item} value={answers[item.id]} onChange={v => setAnswers(a => ({ ...a, [item.id]: v }))} />
+            {itemNonConforming(item, answers[item.id]) && (
+              <div className="mt-2 rounded-xl border border-danger-500/30 bg-danger-50/50 p-2">
+                <p className="text-[11px] text-danger-700 mb-1">عدم انطباق — توضیح (اختیاری)</p>
+                <textarea className={inputCls + ' text-xs'} rows={2} maxLength={500}
+                  placeholder="چه مشکلی دیده شد؟ (مثلاً: چراغ راهنمای راست شکسته است)"
+                  value={answers[item.id + '__note'] || ''}
+                  onChange={e => setAnswers(a => ({ ...a, [item.id + '__note']: e.target.value }))} />
+              </div>
+            )}
           </div>
             </Fragment>
           );
@@ -9172,7 +9193,7 @@ function recordReportHtml(rec, org) {
   // اجرا کند (رفع ایراد امنیتی ذخیره‌شده).
   const rows = rec.details.map(d => `
     <tr>
-      <td>${escapeHtml(d.label)}</td>
+      <td>${escapeHtml(d.label)}${d.note ? '<div style="font-size:11px;color:#b45309;margin-top:3px">توضیح: ' + escapeHtml(d.note) + '</div>' : ''}</td>
       <td>${typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value === undefined || d.value === null || d.value === '' ? '—' : escapeHtml(toPersianDigits(String(d.value))))}</td>
       <td>${d.na ? 'کاربرد ندارد' : (d.max > 0 ? toPersianDigits(Math.round(d.earned || 0)) + ' از ' + toPersianDigits(d.max) : 'اطلاعاتی')}</td>
       <td>${d.critical ? 'بله' : 'خیر'}</td>
@@ -9323,9 +9344,10 @@ async function exportRecordsXlsx(records, org, notify) {
         'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': d.label,
         'پاسخ': typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value ?? ''),
         'امتیاز کسب‌شده': d.na ? 'کاربرد ندارد' : (d.earned ?? ''), 'حداکثر امتیاز': d.na ? '' : d.max, 'حیاتی': d.critical ? 'بله' : 'خیر',
+        'توضیح عدم انطباق': d.note || '',
       });
     });
-    if (r.notes) detailRows.push({ 'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': 'یادداشت', 'پاسخ': r.notes, 'امتیاز کسب‌شده': '', 'حداکثر امتیاز': '', 'حیاتی': '' });
+    if (r.notes) detailRows.push({ 'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': 'یادداشت', 'پاسخ': r.notes, 'امتیاز کسب‌شده': '', 'حداکثر امتیاز': '', 'حیاتی': '', 'توضیح عدم انطباق': '' });
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), 'خلاصه سوابق');
@@ -9398,7 +9420,7 @@ function nonconformityReportHtml(ncRecords, org, rangeLabel) {
     const failed = (r.details || []).filter(d => d && d.max > 0 && Number(d.earned) === 0);
     const rows = failed.map(d => `
       <tr>
-        <td>${esc(d.label)}</td>
+        <td>${esc(d.label)}${d.note ? '<div style="font-size:11px;color:#b45309;margin-top:3px">توضیح: ' + esc(d.note) + '</div>' : ''}</td>
         <td>${d.value === false ? 'تأیید نشد' : esc(String(d.value === undefined || d.value === null || d.value === '' ? '—' : d.value))}</td>
         <td>${d.critical ? '<b class="nc-bad">بله</b>' : 'خیر'}</td>
       </tr>`).join('');
@@ -9958,7 +9980,7 @@ function SignQueuePage({ goRecord }) {
               <div className="divide-y divide-slate-100 border border-slate-100 rounded-xl overflow-hidden max-h-56 overflow-y-auto">
                 {openRec.details.map(d => (
                   <div key={d.itemId} className="flex justify-between p-2.5 text-xs">
-                    <span className="text-slate-600">{d.label}{d.critical && <span className="text-danger-500 mr-1">(حیاتی)</span>}</span>
+                    <span className="text-slate-600">{d.label}{d.critical && <span className="text-danger-500 mr-1">(حیاتی)</span>}{d.note && <span className="block text-[11px] text-warn-700 mt-0.5">توضیح: {d.note}</span>}</span>
                     <span className="font-medium text-slate-800">
                       {typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value ?? '—')}
                     </span>
