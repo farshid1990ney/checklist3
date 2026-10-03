@@ -8055,6 +8055,8 @@ function TemplatesPage() {
   const [showForm, setShowForm] = useState(false);
   const [showPresets, setShowPresets] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [delAssets, setDelAssets] = useState(true);
   const canManage = !!(perms && perms.canManage);
 
   const usageCount = (tplId) => data.assets.filter(a => a.templateId === tplId).length;
@@ -8103,6 +8105,28 @@ function TemplatesPage() {
       : 'قالب چک‌لیست ذخیره شد.', 'success');
   };
 
+  /* حذف قالب (آماده یا ساخته‌شده توسط خودتان).
+     • سوابق بازرسی‌های قبلی و اقدام‌های اصلاحی دست‌نخورده می‌مانند (نام قالب داخل خود سابقه ذخیره است).
+     • زیرسیستم‌های وصل‌به‌قالب: یا همراه قالب حذف می‌شوند یا «بدون قالب» می‌مانند تا بعداً به قالب دیگری وصل شوند.
+     • وظایف «در انتظار» مربوط به این قالب/زیرسیستم‌ها حذف می‌شوند، چون دیگر قابل اجرا نیستند. */
+  const relatedCounts = (tplId) => ({
+    assets: data.assets.filter(a => a.templateId === tplId).length,
+    records: data.records.filter(r => r.templateId === tplId).length,
+    pending: data.assignments.filter(a => a.status === 'pending' && (a.templateId === tplId || data.assets.some(x => x.id === a.assetId && x.templateId === tplId))).length,
+  });
+  const deleteTemplate = (tpl, withAssets) => {
+    if (!canManage) { notify('برای حذف قالب به دسترسی مدیر نیاز است.', 'error'); return; }
+    update(d => {
+      const assetIds = d.assets.filter(a => a.templateId === tpl.id).map(a => a.id);
+      d.templates = d.templates.filter(x => x.id !== tpl.id);
+      if (withAssets) d.assets = d.assets.filter(a => a.templateId !== tpl.id);
+      else d.assets = d.assets.map(a => a.templateId === tpl.id ? Object.assign({}, a, { templateId: '' }) : a);
+      d.assignments = d.assignments.filter(a => !(a.status === 'pending' && (a.templateId === tpl.id || assetIds.includes(a.assetId))));
+    });
+    setConfirmDelete(null);
+    notify('قالب «' + tpl.name + '» حذف شد.', 'success');
+  };
+
   const toggleArchive = (tpl) => {
     if (!canManage) { notify('برای بایگانی قالب به دسترسی مدیر نیاز است.', 'error'); return; }
     update(d => {
@@ -8149,6 +8173,7 @@ function TemplatesPage() {
                 <button onClick={() => setConfirmArchive(t)} className="text-xs bg-warn-50 text-warn-700 rounded-lg py-2 px-3 hover:bg-warn-500/20">
                   {t.archived ? 'بازگردانی' : 'بایگانی'}
                 </button>
+                <button onClick={() => { setDelAssets(true); setConfirmDelete(t); }} className="text-xs bg-danger-50 text-danger-600 rounded-lg py-2 px-3 hover:bg-danger-100 mr-auto">حذف</button>
               </div>
             ) : (
               <p className="text-[11px] text-slate-400 mt-3">به‌کار رفته در {toPersianDigits(usageCount(t.id))} زیرسیستم — برای ویرایش به دسترسی مدیر نیاز است</p>
@@ -8182,6 +8207,37 @@ function TemplatesPage() {
           linkedAssets={editing ? data.assets.filter(a => a.templateId === editing.id) : []}
           onSave={saveTemplate} onCancel={() => setShowForm(false)} />
       </Modal>
+
+      {confirmDelete && (() => {
+        const rc = relatedCounts(confirmDelete.id);
+        return (
+          <div className="fixed inset-0 z-[60] no-print flex items-center justify-center p-4 bg-slate-900/50">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-3">
+              <h3 className="font-bold text-slate-800">حذف قالب «{confirmDelete.name}»</h3>
+              <p className="text-sm text-slate-500">این کار قابل بازگشت نیست. سوابق بازرسی‌های قبلی ({toPersianDigits(rc.records)} مورد) و اقدام‌های اصلاحی در تاریخچه و گزارش‌ها باقی می‌ماند.</p>
+              {rc.assets > 0 && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                  <p className="text-xs text-slate-600">{toPersianDigits(rc.assets)} زیرسیستم/تجهیز به این قالب وصل است:</p>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input type="radio" className="mt-1" checked={delAssets} onChange={() => setDelAssets(true)} />
+                    <span>همراه قالب حذف شوند</span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input type="radio" className="mt-1" checked={!delAssets} onChange={() => setDelAssets(false)} />
+                    <span>بمانند، ولی «بدون قالب» (بعداً از صفحه «تجهیزات» به قالب دیگری وصل می‌شوند)</span>
+                  </label>
+                </div>
+              )}
+              {rc.pending > 0 && <p className="text-xs text-warn-700">{toPersianDigits(rc.pending)} وظیفه‌ی در انتظار مربوط به این قالب نیز حذف می‌شود.</p>}
+              <p className="text-[11px] text-slate-400">اگر فقط نمی‌خواهید دیگر استفاده شود، «بایگانی» گزینه‌ی امن‌تری است.</p>
+              <div className="flex gap-2 justify-end pt-1">
+                <button onClick={() => setConfirmDelete(null)} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+                <button onClick={() => deleteTemplate(confirmDelete, rc.assets > 0 ? delAssets : true)} className="px-4 py-2 rounded-xl text-sm text-white bg-danger-500 hover:bg-danger-700">حذف قالب</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <ConfirmDialog open={!!confirmArchive}
         title={confirmArchive && confirmArchive.archived ? 'بازگردانی قالب' : 'بایگانی قالب'}
