@@ -3923,6 +3923,7 @@ const LIB_SOURCES = {
     ],
   },
 };
+const LIB_LOAD_TIMEOUT_MS = 12000;
 const _libLoading = new Map();
 
 /** کتابخانه را در صورت نیاز لود می‌کند و global آن را برمی‌گرداند. */
@@ -3938,10 +3939,13 @@ function ensureLib(name) {
       try {
         await new Promise((resolve, reject) => {
           const el = document.createElement('script');
+          // سقف زمانی: اگر CDN فیلتر/کند باشد و نه خطا بدهد نه جواب، بدون این سقف
+          // کاربر دقیقه‌ها منتظر می‌ماند و منبع دوم هرگز امتحان نمی‌شد.
+          const timer = setTimeout(() => { el.onload = el.onerror = null; el.remove(); reject(new Error('زمان بارگذاری تمام شد: ' + url)); }, LIB_LOAD_TIMEOUT_MS);
           el.src = url;
           el.async = true;
-          el.onload = () => resolve();
-          el.onerror = () => { el.remove(); reject(new Error('بارگذاری ناموفق: ' + url)); };
+          el.onload = () => { clearTimeout(timer); resolve(); };
+          el.onerror = () => { clearTimeout(timer); el.remove(); reject(new Error('بارگذاری ناموفق: ' + url)); };
           document.head.appendChild(el);
         });
         if (window[spec.global]) return window[spec.global];
@@ -5880,6 +5884,45 @@ function DataProvider({ children }) {
     return null;
   }, []);
 
+  /** چند رکورد را با هم کامل می‌کند: امضاهای بیرونیِ کش‌نشده در دسته‌های ۱۵تایی و ۳ درخواست
+      موازی گرفته می‌شوند (به‌جای یک درخواست جدا برای هر امضا و رکورد پشت‌سرهم). */
+  const ensureRecordsVisuals = useCallback(async (recs) => {
+    const list = Array.isArray(recs) ? recs : [];
+    const cfg = resolveCloudConfig((dataRef.current || {}).settings || {});
+    const missing = [];
+    list.forEach(rec => {
+      const sigs = (rec && rec.signatures) || {};
+      Object.keys(sigs).forEach(role => {
+        const s = sigs[role];
+        if (s && !s.image && s.external && s.fileId && !sigCacheRef.current[(rec.id || '') + ':' + role]) missing.push({ key: (rec.id || '') + ':' + role, fileId: s.fileId });
+      });
+    });
+    if (missing.length && cfg.url && cfg.apiKey) {
+      const chunks = [];
+      for (let i = 0; i < missing.length; i += 15) chunks.push(missing.slice(i, i + 15));
+      let next = 0;
+      const worker = async () => {
+        while (next < chunks.length) {
+          const chunk = chunks[next++];
+          try {
+            const res = await Promise.race([
+              signedCall(cfg.url, cfg.apiKey, 'records.signatures', { fileIds: chunk.map(c => c.fileId) }),
+              new Promise(r => setTimeout(() => r(null), 25000)),
+            ]);
+            if (res && res.images) chunk.forEach(c => { if (res.images[c.fileId]) sigCacheRef.current[c.key] = res.images[c.fileId]; });
+          } catch (e) { /* سرور قدیمی (۸.۶ یا کمتر) این عملیات را ندارد؛ مسیر تکی جایگزین می‌شود */ }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()].slice(0, Math.min(3, chunks.length)));
+    }
+    // کش پر شده؛ تکمیل تک‌تک رکوردها (برای موارد جاافتاده، مسیر قدیمی با سقف ۴ ثانیه)، ۴ رکورد موازی
+    const out = new Array(list.length);
+    let idx = 0;
+    const pool = async () => { while (idx < list.length) { const i = idx++; out[i] = await ensureRecordVisuals(list[i]); } };
+    await Promise.all([pool(), pool(), pool(), pool()].slice(0, Math.min(4, list.length)));
+    return out;
+  }, [ensureRecordVisuals]);
+
   /** رکورد را با تصاویر امضای کامل برمی‌گرداند (بدون تغییر در داده‌ی اصلی) */
   const ensureRecordVisuals = useCallback(async (rec) => {
     if (!rec || !rec.signatures) return rec;
@@ -6022,7 +6065,7 @@ function DataProvider({ children }) {
   const value = {
     data, update, session, login, logout, currentUser, perms, verifyManagerPin, notify,
     sync, syncNow, pullNow, replaceFromCloud, migrateLocalToCloud, clearConflicts, retryConflict,
-    ensureRecordVisuals, resolveSignature,
+    ensureRecordVisuals, ensureRecordsVisuals, resolveSignature,
   };
 
   return (
@@ -9389,7 +9432,9 @@ function rangedPdfFileName(prefix, count) {
  */
 async function downloadSequentialPdf(records, org, notify) {
   if (!Array.isArray(records) || !records.length) return false;
-  const bodyHtml = records.map(r => recordReportHtml(r, org)).join('');
+  if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)… چند لحظه صبر کنید.', 'info');
+  const light = await Promise.all(records.map(withLightPhotos));
+  const bodyHtml = light.map(r => recordReportHtml(r, org)).join('');
   const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   if (!b64) {
     if (notify) notify('ساخت PDF ممکن نشد (کتابخانه در دسترس نیست). از دکمه‌ی «چاپ پشت‌سرهم» استفاده کنید.', 'error');
@@ -9462,6 +9507,7 @@ async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
     if (notify) notify('در این مجموعه عدم انطباقی وجود ندارد.', 'error');
     return false;
   }
+  if (notify) notify('در حال ساخت گزارش عدم انطباق… چند لحظه صبر کنید.', 'info');
   const bodyHtml = nonconformityReportHtml(ncRecords, org, rangeLabel);
   const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE + NC_STYLE);
   if (!b64) {
@@ -10131,7 +10177,7 @@ function ExternalPhoto({ ph, settings }) {
 }
 
 function RecordsPage({ focusRecordId, onFocusHandled }) {
-  const { data, notify, currentUser, perms, ensureRecordVisuals } = useAppData();
+  const { data, notify, currentUser, perms, ensureRecordVisuals, ensureRecordsVisuals } = useAppData();
   const [selected, setSelected] = useState([]);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('همه');
@@ -10154,11 +10200,21 @@ function RecordsPage({ focusRecordId, onFocusHandled }) {
   }, [focusRecordId]);
 
   // تصاویر امضا ممکن است به‌صورت ارجاع به Drive باشند؛ پیش از چاپ کامل می‌شوند
-  const withVisuals = async (recs) => {
-    const out = [];
-    for (const r of recs) out.push(await ensureRecordVisuals(r));
-    return out;
-  };
+  const withVisuals = async (recs) => ensureRecordsVisuals ? ensureRecordsVisuals(recs) : Promise.all(recs.map(r => ensureRecordVisuals(r)));
+
+  // کتابخانه‌های خروجی (PDF/اکسل) هم‌زمان با باز شدن این صفحه در پس‌زمینه لود می‌شوند تا
+  // اولین کلیک روی «خروجی» منتظر دانلود ~۱MB نماند. شکستش بی‌صدا و بی‌اثر است.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        const c = navigator.connection;
+        if (c && (c.saveData || /(^|-)2g$/.test(c.effectiveType || ''))) return;
+      } catch (e) {}
+      ensureLib('html2pdf').catch(() => {});
+      ensureLib('xlsx').catch(() => {});
+    }, 1200);
+    return () => clearTimeout(t);
+  }, []);
   const doPrintOne = async (rec) => {
     setPrinting(true);
     try { printSingleRecord((await withVisuals([rec]))[0], data.settings, notify); }
@@ -10715,7 +10771,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.6
+ *  نسخه: 8.7
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -10768,6 +10824,15 @@ const APPS_SCRIPT_CODE = `/**
  *
  *  ۱۲. کد فرم قالب (نسخه ۸.۶): ستون متنی تازه‌ی «formCode» در انتهای شیت templates
  *      (مثلاً PM-CL-HS-52-00) تا کد فرم کاغذی هر چک‌لیست همراه قالب همگام شود.
+ *
+ *  ۱۳. سرعت خروجی (نسخه ۸.۷) — بدون تغییر ساختار داده:
+ *      • save_record / backup دیگر قفل سراسری را در کل مدت ساخت PDF و کار با درایو نگه نمی‌دارند؛
+ *        قفل فقط دور نوشتن روی شیت می‌ماند. قبلاً هر ساخت PDF (چند ثانیه) همگام‌سازی همه‌ی
+ *        کاربران را پشت خودش صف می‌کرد.
+ *      • مسیر پوشه‌ی درایو (سال/ماه/دسته) کش می‌شود: به‌جای ۴ جستجوی پوشه در هر ذخیره، یک
+ *        getFolderById. اگر پوشه پاک/به سطل زباله رفته باشد خودکار دوباره ساخته می‌شود.
+ *      • recordToSpreadsheet فقط برای گرفتن لینک، شیت را دوباره با openById باز می‌کرد؛ حالا ss.getUrl().
+ *      • عملیات تازه‌ی records.signatures: گرفتن چند تصویر امضا در یک درخواست (به‌جای یک درخواست برای هر امضا).
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -10799,7 +10864,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.6";
+var SERVER_VERSION = "8.7";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -12118,7 +12183,9 @@ var WRITE_ACTIONS = {
   "db.pull": false, "db.revision": false, "bootstrap": false, "settings.get": false,
   "records.list": false, "records.get": false, "records.signature": false,
   "users.get": false, "auth.login": false, "list_records": false, "export_zip": false,
-  "invites.list": false
+  "invites.list": false, "records.signatures": false,
+  // کار طولانی درایو/PDF؛ قفل فقط دور نوشتن شیت (داخل handleSaveRecord) گرفته می‌شود
+  "save_record": false, "record": false, "save_pdf": false, "save_html_pdf": false, "backup": false
 };
 
 function routeAction(action, body, envelope) {
@@ -12160,6 +12227,7 @@ function routeAction(action, body, envelope) {
     case "records.list":     return handleRecordsList(ss, body);
     case "records.get":      return handleRecordGet(ss, body);
     case "records.signature": return handleSignatureGet(ss, body);
+    case "records.signatures": return handleSignaturesBatch(ss, body);
 
     case "categories.set":   return handleCategoriesSet(ss, body);
     case "settings.get":     return { ok: true, status: "success", settings: getSettings(ss) };
@@ -12833,6 +12901,53 @@ function handleSignatureGet(ss, body) {
   } catch (e) { return err("فایل امضا یافت نشد."); }
 }
 
+/** گرفتن چند تصویر امضا در یک درخواست (حداکثر ۲۵ مورد). کلید خروجی = fileId. */
+function handleSignaturesBatch(ss, body) {
+  var ids = body && body.fileIds;
+  if (!Array.isArray(ids)) return err("fileIds باید آرایه باشد.");
+  ids = ids.slice(0, 25);
+  var images = {};
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      var f = DriveApp.getFileById(String(ids[i]));
+      images[String(ids[i])] = "data:" + (f.getMimeType() || "image/png") + ";base64," + Utilities.base64Encode(f.getBlob().getBytes());
+    } catch (e) { /* فایل پیدا نشد؛ از خروجی حذف می‌شود */ }
+  }
+  return { ok: true, status: "success", images: images };
+}
+
+/** پوشه‌ی نهایی «ریشه/سال/ماه/دسته» را با کش شناسه می‌گیرد (۱ فراخوانی به‌جای ۴ جستجو). */
+function getRecordFolder_(rootName, d, cat) {
+  var year = jalaliYear(d), month = jalaliMonthFolder(d);
+  var cache = null, key = "";
+  try {
+    cache = CacheService.getScriptCache();
+    key = "fld_" + sha256Hex([rootName, year, month, cat].join("/")).slice(0, 28);
+    var id = cache.get(key);
+    if (id) {
+      try {
+        var cached = DriveApp.getFolderById(id);
+        if (!cached.isTrashed()) return cached;
+      } catch (eStale) { /* پوشه پاک شده؛ از نو ساخته می‌شود */ }
+    }
+  } catch (eCache) { cache = null; }
+  var rootFolder = getOrCreateFolder(DriveApp.getRootFolder(), rootName);
+  var yearFolder = getOrCreateFolder(rootFolder, year);
+  var monthFolder = getOrCreateFolder(yearFolder, month);
+  var catFolder = getOrCreateFolder(monthFolder, cat);
+  try { if (cache && key) cache.put(key, catFolder.getId(), 21600); } catch (ePut) {}
+  return catFolder;
+}
+
+/** اجرای fn زیر قفل سراسری (فقط برای بخش کوتاهِ نوشتن روی شیت). */
+function withDbLock_(fn) {
+  var lock = LockService.getScriptLock();
+  var got = false;
+  try { got = lock.tryLock(LOCK_WAIT_MS); } catch (e) { got = false; }
+  if (!got) throw new Error("سرور در حال پردازش درخواست دیگری است؛ لحظاتی دیگر تلاش کنید.");
+  try { return fn(); } finally { try { lock.releaseLock(); } catch (e2) {} }
+}
+
 /** تعداد آیتم‌های «کاربرد ندارد» در details یک رکورد (برای اعلان ایمیل). */
 function countNaItems_(rec) {
   var list = rec && rec.details;
@@ -12872,10 +12987,7 @@ function handleSaveRecord(ss, rootName, data) {
   var d = new Date(toMs(rec.completedAt || rec.startedAt) || nowMs());
   var cat = cleanName(rec.category || "عمومی", 40);
 
-  var rootFolder = getOrCreateFolder(DriveApp.getRootFolder(), rootName);
-  var yearFolder = getOrCreateFolder(rootFolder, jalaliYear(d));
-  var monthFolder = getOrCreateFolder(yearFolder, jalaliMonthFolder(d));
-  var catFolder = getOrCreateFolder(monthFolder, cat);
+  var catFolder = getRecordFolder_(rootName, d, cat);
 
   var jDateStr = toJalaliDate(d).replace(/\\//g, "-");
   var assetPart = rec.assetCode ? cleanName(rec.assetCode, 30) + "_" : "";
@@ -12933,8 +13045,11 @@ function handleSaveRecord(ss, rootName, data) {
     // «جهشِ پنهانِ ساعت» باعث می‌شد اولین ویرایش بعدیِ همان رکورد — که با ساعت
     // کلاینت push می‌شود و می‌تواند چند ثانیه از ساعت سرور عقب‌تر باشد — رد شود
     // (پیام «۱ تغییر محلی اعمال نشد چون نسخه‌ی جدیدتری روی سرور بود»).
-    upsertEntity(ss, "records", savedRec, { force: true, preserveUpdatedAt: true });
-    bumpRevision(ss);
+    // قفل فقط برای همین نوشتن کوتاه (ساخت PDF و کار با درایو بالاتر، بدون قفل انجام شد)
+    withDbLock_(function () {
+      upsertEntity(ss, "records", savedRec, { force: true, preserveUpdatedAt: true });
+      bumpRevision(ss);
+    });
   } catch (eRec) { savedRec = null; }
 
   var sheetUrl = "";
@@ -12994,7 +13109,7 @@ function createPdfFromHtml(folder, baseName, html, rec) {
 
 function recordToSpreadsheet(ss) {
   var sh = getSheet(ss, "records");
-  return SpreadsheetApp.openById(ss.getId()).getUrl() + "#gid=" + sh.getSheetId();
+  return ss.getUrl() + "#gid=" + sh.getSheetId();
 }
 
 /* =====================================================================
@@ -13513,8 +13628,11 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   };
   const CONTENT_H = measureH();
   const PIXEL_BUDGET = 13000000; // زیر سقف iOS با حاشیه‌ی امن
+  const PDF_MAX_SCALE = 1.5;
   const fitScale = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(CONTENT_H, 600)))));
-  const s1 = Math.min(2, Math.round(fitScale * 100) / 100);
+  // سقف مقیاس ۲ → ۱٫۵: در اندازه‌گیری، زمان رندر ~۲۵٪ و حجم PDF ~۵۵٪ کمتر می‌شود
+  // (آپلود/دانلود سریع‌تر) و متن چک‌لیست همچنان ~۱۴۴dpi و خوانا می‌ماند.
+  const s1 = Math.min(PDF_MAX_SCALE, Math.round(fitScale * 100) / 100);
   const s2 = Math.max(0.6, Math.round(fitScale * 0.7 * 100) / 100);
 
   /** تعداد صفحه‌های PDF (برای کشف «برگه‌ی بلند ولی فقط ۱ صفحه» = خروجی ناقص) */
@@ -13530,7 +13648,7 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     // حاشیه‌ها دقیقاً مثل @page { margin: 14mm } در REPORT_STYLE — یعنی همان
     // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
     margin: [14, 14, 14, 14],
-    image: { type: 'jpeg', quality: sc >= 1.5 ? 0.96 : 0.9 },
+    image: { type: 'jpeg', quality: sc >= 1.4 ? 0.85 : 0.8 },
     html2canvas: { scale: sc, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'] },
@@ -13540,7 +13658,9 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   if (b64) {
     // اگر محتوا به‌قدر کافی بلند است که باید چندصفحه‌ای شود ولی خروجی تک‌صفحه
     // آمد، یعنی html2canvas بخشی را از دست داده → با مقیاس پایین‌تر دوباره.
-    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 1016));
+    // ارتفاع محتوای هر صفحه: (۲۹۷−۲۸)/(۲۱۰−۲۸)×۷۹۴ ≈ ۱۱۷۳px (نه ۱۰۱۶) — عدد قبلی صفحه‌ها را بیش‌ازحد
+    // تخمین می‌زد و می‌توانست رندر دوم (دو برابر زمان) را بی‌دلیل راه بیندازد.
+    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 1170));
     if (expectedPages > 1) {
       const got = pdfPageCount(b64);
       if (got > 0 && got < expectedPages) {
@@ -13551,6 +13671,41 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     return b64;
   }
   return await tryBuild(optFor(s2));
+}
+
+/* عکس‌های بازرسی در گزارش فقط ۱۲۰×۹۰ پیکسل نمایش داده می‌شوند، ولی نسخه‌ی ذخیره‌شده تا ۱۲۸۰px
+   (~۲۰۰–۴۰۰KB هر عکس) است. هنگام ساخت HTML گزارش برای سرور/PDF، عکس‌ها به ۴۸۰px کوچک می‌شوند
+   (۴ برابرِ اندازه‌ی نمایش — کیفیت چاپ حفظ می‌شود) تا درخواست آپلود، تبدیل سرور و رندر سبک شود.
+   داده‌ی اصلی رکورد دست نمی‌خورد. */
+const _reportPhotoCache = new Map();
+function shrinkDataUrl(dataUrl, maxDim, quality) {
+  return new Promise(resolve => {
+    try {
+      if (typeof dataUrl !== 'string' || dataUrl.indexOf('data:image') !== 0 || dataUrl.length < 60000) { resolve(dataUrl); return; }
+      const key = dataUrl.length + ':' + dataUrl.slice(-48) + ':' + maxDim;
+      if (_reportPhotoCache.has(key)) { resolve(_reportPhotoCache.get(key)); return; }
+      const img = new Image();
+      const done = (v) => { if (v !== dataUrl) _reportPhotoCache.set(key, v); resolve(v); };
+      img.onload = () => {
+        try {
+          const r = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight, 1));
+          if (r >= 1) { done(dataUrl); return; }
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round(img.naturalWidth * r)); c.height = Math.max(1, Math.round(img.naturalHeight * r));
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          const out = c.toDataURL('image/jpeg', quality);
+          done(out.length < dataUrl.length ? out : dataUrl);
+        } catch (e) { done(dataUrl); }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch (e) { resolve(dataUrl); }
+  });
+}
+async function withLightPhotos(rec) {
+  if (!rec || !Array.isArray(rec.photos) || !rec.photos.some(p => p && p.image)) return rec;
+  const photos = await Promise.all(rec.photos.map(async p => (p && p.image) ? Object.assign({}, p, { image: await shrinkDataUrl(p.image, 480, 0.72) }) : p));
+  return Object.assign({}, rec, { photos });
 }
 
 /**
@@ -13594,7 +13749,7 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify, opts) {
   //     → همگام‌سازی سریع‌تر تمام می‌شود
   //   ✓ PDF درایو با متن واقعی (نه عکس) و چیدمان بلوکیِ کامل ساخته می‌شود
   const serverOnly = !!(opts && opts.serverOnly);
-  const bodyHtml = recordReportHtml(record, org);
+  const bodyHtml = recordReportHtml(await withLightPhotos(record), org);
   const pdfBase64 = serverOnly ? null : await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   const serverStyle = pdfBase64 ? '' : SERVER_FALLBACK_STYLE;
   const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}${serverStyle}</style></head><body>${bodyHtml}</body></html>`;
