@@ -9285,38 +9285,51 @@ function recordReportHtml(rec, org) {
 }
 
 const REPORT_STYLE = `
-  @page { size: A4; margin: 14mm; }
-  body { font-family: Tahoma, sans-serif; color:#0f172a; direction:rtl; }
-  .report { }
-  .hdr { display:flex; align-items:center; gap:12px; border-bottom:2px solid #0f172a; padding-bottom:10px; margin-bottom:12px; }
-  .logo { height:48px; }
-  .org-name { font-size:18px; font-weight:bold; }
-  .sub { font-size:12px; color:#475569; }
-  table.meta { width:100%; border-collapse:collapse; margin-bottom:14px; font-size:12px; }
-  table.meta td { border:1px solid #e2e8f0; padding:6px 8px; }
+  @page { size: A4 portrait; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:#fff; }
+  body { font-family: Tahoma, Arial, sans-serif; color:#0f172a; direction:rtl; font-size:11pt; line-height:1.55; }
+  .report { width:100%; max-width:186mm; margin:0 auto; page-break-inside:auto; break-inside:auto; }
+  .report:not(:first-child) { page-break-before:always; break-before:page; }
+  .hdr { display:block; border-bottom:2px solid #0f172a; padding-bottom:8px; margin-bottom:10px; }
+  .hdr .logo { display:block; height:44px; max-width:100%; object-fit:contain; margin-bottom:5px; }
+  .hdr-text { display:block; }
+  .org-name { font-size:17px; font-weight:bold; }
+  .sub { font-size:11px; color:#475569; }
+  table.meta { width:100%; table-layout:fixed; border-collapse:collapse; margin-bottom:12px; font-size:11px; }
+  table.meta td { border:1px solid #cbd5e1; padding:5px 7px; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
   table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
-  table.results { width:100%; border-collapse:collapse; font-size:12px; margin-bottom:12px; }
-  table.results th, table.results td { border:1px solid #e2e8f0; padding:6px 8px; text-align:right; }
-  table.results th { background:#f1f5f9; }
-  .summary { display:flex; gap:24px; font-size:13px; margin-bottom:10px; }
-  .notes { font-size:12px; background:#f8fafc; padding:8px 10px; border-radius:6px; margin-bottom:14px; }
-  .sigs { display:flex; gap:16px; margin-top:20px; }
-  .sig-box { flex:1; border:1px solid #e2e8f0; border-radius:8px; padding:10px; text-align:center; }
-  .sig-title { font-size:11px; color:#64748b; margin-bottom:6px; }
-  .sig-box img { height:60px; object-fit:contain; }
-  .sig-name { font-size:11px; margin-top:4px; }
-  .sig-onsite { font-size:10px; color:#0369a1; margin-top:3px; }
-  .sig-empty { font-size:11px; color:#cbd5e1; padding:20px 0; }
-  .photos { margin-top:16px; page-break-inside:avoid; }
-  .photos > b { font-size:12px; display:block; margin-bottom:6px; }
-  .photo-grid { display:flex; flex-wrap:wrap; gap:8px; }
-  .photo-grid img { width:120px; height:90px; object-fit:cover; border:1px solid #e2e8f0; border-radius:6px; }
-  .photo-ext { width:120px; height:90px; border:1px dashed #cbd5e1; border-radius:6px; font-size:10px; color:#94a3b8; display:flex; align-items:center; justify-content:center; text-align:center; padding:6px; }
+  table.meta td:nth-child(even) { width:35%; }
+  table.results { width:100%; table-layout:fixed; border-collapse:collapse; font-size:11px; margin-bottom:10px; }
+  table.results th, table.results td { border:1px solid #cbd5e1; padding:5px 7px; text-align:right; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
+  table.results th:nth-child(1), table.results td:nth-child(1) { width:44%; }
+  table.results th:nth-child(2), table.results td:nth-child(2) { width:24%; }
+  table.results th:nth-child(3), table.results td:nth-child(3) { width:18%; }
+  table.results th:nth-child(4), table.results td:nth-child(4) { width:14%; }
+  table.results th { background:#f1f5f9; font-weight:bold; }
+  thead { display:table-header-group; }
+  tr { page-break-inside:avoid; page-break-after:auto; }
+  .summary { display:block; font-size:12px; margin-bottom:8px; }
+  .summary > div { display:block; margin:3px 0; }
+  .notes { font-size:11px; background:#f8fafc; padding:7px 9px; border:1px solid #e2e8f0; border-radius:5px; margin-bottom:10px; page-break-inside:avoid; }
+  .sigs { display:block; margin-top:14px; page-break-inside:auto; break-inside:auto; }
+  .sig-box { display:block; width:100%; border:1px solid #cbd5e1; border-radius:6px; padding:8px; text-align:center; margin-bottom:8px; page-break-inside:avoid; }
+  .sig-title { font-size:10px; color:#64748b; margin-bottom:4px; }
+  .sig-box img { max-width:100%; height:52px; object-fit:contain; }
+  .sig-name { font-size:10px; margin-top:3px; }
+  .sig-onsite { font-size:9px; color:#0369a1; margin-top:2px; }
+  .sig-empty { font-size:10px; color:#94a3b8; padding:16px 0; }
+  .photos { margin-top:12px; page-break-inside:auto; break-inside:auto; }
+  .photos > b { font-size:11px; display:block; margin-bottom:5px; }
+  .photo-grid { display:block; }
+  .photo-grid img { display:inline-block; vertical-align:top; width:58mm; height:43mm; object-fit:cover; border:1px solid #cbd5e1; border-radius:4px; margin:0 0 5px 5px; }
+  .photo-ext { display:inline-flex; vertical-align:top; width:58mm; height:43mm; border:1px dashed #cbd5e1; border-radius:4px; font-size:9px; color:#94a3b8; align-items:center; justify-content:center; text-align:center; padding:5px; margin:0 0 5px 5px; }
+  .pdf-page-break { display:none !important; }
 `;
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r4';
+const APP_BUILD = 'B-14050626r6';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -9447,17 +9460,41 @@ function rangedPdfFileName(prefix, count) {
  */
 async function downloadSequentialPdf(records, org, notify) {
   if (!Array.isArray(records) || !records.length) return false;
-  if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)… چند لحظه صبر کنید.', 'info');
-  const light = await Promise.all(records.map(withLightPhotos));
-  // یک بخش برای هر رکورد: سندهای بلند دسته‌دسته رندر می‌شوند (سقف اندازه‌ی بوم مرورگر)
-  const b64 = await htmlToPdfBase64(light.map(r => recordReportHtml(r, org)), REPORT_STYLE);
-  if (!b64) {
-    if (notify) notify(pdfFailureMessage(), 'error');
+  if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)…', 'info');
+
+  // مسیر اصلی: PDF واقعی سمت سرور؛ متن قابل انتخاب/جست‌وجو و صفحه‌بندی A4.
+  try {
+    const cfg = resolveCloudConfig(org || {});
+    const light = await Promise.all(records.map(withLightPhotos));
+    const body = light.map(r => recordReportHtml(r, org)).join('');
+    if (cfg && cfg.url && cfg.apiKey && body.length <= 6500000) {
+      const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
+        { html: body, style: REPORT_STYLE + SERVER_FALLBACK_STYLE }, cloudFolderName(org));
+      if (res && res.ok && res.pdfBase64) {
+        downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
+        if (notify) notify('PDF واقعی و با کیفیت اصلی (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('server PDF failed; falling back to browser renderer', e);
+  }
+
+  // fallback برای حالت آفلاین/سرور قدیمی یا درخواست بزرگ.
+  try {
+    const light = await Promise.all(records.map(withLightPhotos));
+    const b64 = await htmlToPdfBase64(light.map(r => recordReportHtml(r, org)), REPORT_STYLE);
+    if (!b64) {
+      if (notify) notify(pdfFailureMessage(), 'error');
+      return false;
+    }
+    downloadBase64Pdf(b64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
+    if (notify) notify('PDF پشت‌سرهم (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
+    return true;
+  } catch (e) {
+    if (notify) notify('ساخت PDF ناموفق بود: ' + (e.message || e), 'error');
     return false;
   }
-  downloadBase64Pdf(b64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
-  if (notify) notify('PDF پشت‌سرهم (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
-  return true;
 }
 
 /* ============================================================
@@ -10963,13 +11000,10 @@ function UsersPage() {
    ۱۷. کد کامل Google Apps Script (پل ارتباطی بدون نیاز به کلود)
    ============================================================ */
 /*__CODE_GS_START__*/
-// کد کامل Google Apps Script (نسخه ۸ — پایگاه Google Sheets) که در صفحه تنظیمات
-// قابل کپی است. این بلوک به‌طور خودکار از فایل Code.gs تولید می‌شود:
-//     node tools/build.mjs
-const APPS_SCRIPT_CODE = `/**
+/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.7
+ *  نسخه: 8.8
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -11062,7 +11096,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.7";
+var SERVER_VERSION = "8.9";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -11190,18 +11224,18 @@ function toMs(v) {
 
 /* تبدیل مقدار فیلتر تاریخ به epoch ms (رفع ایراد P3-۱۵).
 
-   \`toMs\` معمولی برای فیلترهای \`from\`/\`to\` کافی نیست: اگر فراخوان تاریخ شمسی
-   بفرستد (که در این سامانه طبیعی‌ترین ورودی است)، \`Date.parse("1403/01/01")\`
+   `toMs` معمولی برای فیلترهای `from`/`to` کافی نیست: اگر فراخوان تاریخ شمسی
+   بفرستد (که در این سامانه طبیعی‌ترین ورودی است)، `Date.parse("1403/01/01")`
    سال **۱۴۰۳ میلادی** را برمی‌گرداند — یعنی ۶۳۲ سال خطا. نتیجه‌اش این است که
    فیلتر یا همه‌چیز را برمی‌گرداند یا هیچ‌چیز را، بدون هیچ پیام خطایی.
 
-   حالا رشته‌ی \`YYYY/MM/DD\` با سالِ بازه‌ی شمسی (۱۳۰۰ تا ۱۵۰۰) به‌درستی تبدیل
-   می‌شود. \`endOfDay\` برای کرانِ بالای فیلتر (\`to\`) استفاده می‌شود تا «تا تاریخ
+   حالا رشته‌ی `YYYY/MM/DD` با سالِ بازه‌ی شمسی (۱۳۰۰ تا ۱۵۰۰) به‌درستی تبدیل
+   می‌شود. `endOfDay` برای کرانِ بالای فیلتر (`to`) استفاده می‌شود تا «تا تاریخ
    فلان» واقعاً کل آن روز را شامل شود، نه فقط لحظه‌ی نیمه‌شبِ اولش. */
 function toFilterMs_(v, endOfDay) {
   if (v === null || v === undefined || v === "") return 0;
   var s = String(v).trim();
-  var m = s.match(/^(\\d{4})[\\/\\-.](\\d{1,2})[\\/\\-.](\\d{1,2})$/);
+  var m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
   if (m) {
     var y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
     var dateOnly = true;
@@ -11245,8 +11279,8 @@ function safeJsonParse(text, fallback) {
 function cleanName(str, maxLen) {
   // نیم‌فاصله (U+200C) کاراکتر معتبر فارسی است و نباید حذف شود
   var s = String(str === null || str === undefined ? "" : str)
-    .replace(/[\\\\/:*?"<>|\\r\\n\\t]/g, "_")
-    .replace(/\\s+/g, " ")
+    .replace(/[\\/:*?"<>|\r\n\t]/g, "_")
+    .replace(/\s+/g, " ")
     .trim();
   var limit = maxLen || 80;
   if (s.length > limit) s = s.slice(0, limit);
@@ -11525,7 +11559,7 @@ function migrateHeader_(sh, sheetName, existing, header) {
     });
 
     // خواندن هم تکه‌تکه انجام می‌شود (رفع ایراد #21): پیش‌تر فقط نوشتن chunked
-    // بود ولی \`getValues\` کل شیت را یک‌جا در حافظه می‌آورد. برای شیت ۱۰٬۰۰۰
+    // بود ولی `getValues` کل شیت را یک‌جا در حافظه می‌آورد. برای شیت ۱۰٬۰۰۰
     // ردیفی با ۳۰ ستون یعنی ۳۰۰٬۰۰۰ سلول هم‌زمان در حافظه، که به سقف حافظه‌ی
     // Apps Script می‌خورد و مهاجرت کرش می‌کرد.
     var CHUNK = 500;
@@ -11639,14 +11673,14 @@ function readTable(ss, entityName, opts) {
 /* ---------------------------------------------------------------------------
    کش نگاشت id → rowIndex (رفع ایراد P1-۲)
 
-   پیش‌تر هر عملیاتِ یک \`db.push\` جداگانه کل ستون id را می‌خواند: با ۶۰ عملیات
+   پیش‌تر هر عملیاتِ یک `db.push` جداگانه کل ستون id را می‌خواند: با ۶۰ عملیات
    یعنی ۶۰ پیمایش کامل شیت. روی پایگاه ۵٬۰۰۰ رکوردی این ~۳۰۰٬۰۰۰ خواندن سلول
    در یک درخواست بود و به سقف زمانی ۶ دقیقه‌ای Apps Script می‌خورد.
 
    حالا نگاشت یک بار در نخستین مراجعه ساخته می‌شود و تا پایان درخواست زنده
    می‌ماند. چون حذف فیزیکی در جریان push اتفاق نمی‌افتد (فقط tombstone) و
-   \`writeRow_\` هنگام append نگاشت تازه را اضافه می‌کند، شماره‌ی ردیف‌ها معتبر
-   می‌ماند. کش فقط داخل \`handleDbPush\` فعال است؛ بقیه‌ی مسیرها مثل قبل کار
+   `writeRow_` هنگام append نگاشت تازه را اضافه می‌کند، شماره‌ی ردیف‌ها معتبر
+   می‌ماند. کش فقط داخل `handleDbPush` فعال است؛ بقیه‌ی مسیرها مثل قبل کار
    می‌کنند.
    --------------------------------------------------------------------------- */
 var ROW_INDEX_CACHE_ = null;
@@ -11796,15 +11830,15 @@ function upsertEntity(ss, entityName, incoming, options) {
 
 /* مهرِ زمانیِ tombstone (رفع ایراد P0-۳: نشت حذف)
 
-   اگر ساعت کلاینت عقب باشد و \`atMs\` با همان ساعتِ عقب فرستاده شود، tombstone با
-   \`updatedAt\` قدیمی ثبت می‌شد. بعداً اگر همان رکورد روی دستگاه دیگری زنده شود و
-   با \`updatedAt\` جدیدتر push گردد، LWW آن را برنده می‌کند و **رکورد حذف‌شده
+   اگر ساعت کلاینت عقب باشد و `atMs` با همان ساعتِ عقب فرستاده شود، tombstone با
+   `updatedAt` قدیمی ثبت می‌شد. بعداً اگر همان رکورد روی دستگاه دیگری زنده شود و
+   با `updatedAt` جدیدتر push گردد، LWW آن را برنده می‌کند و **رکورد حذف‌شده
    دوباره زنده می‌شود**.
 
    حالا مهر حذف هرگز از این سه مقدار کمتر نیست:
-     ۱) \`atMs\` ارسالی کلاینت (ترتیب واقعی حذف‌ها بین چند عملیات یک دسته حفظ شود)
-     ۲) ساعت سرور (\`nowMs\`) — سپر اصلی در برابر clock skew
-     ۳) \`updatedAt\` فعلی همان ردیف روی سرور — تا حذف، از نسخه‌ی موجود قدیمی‌تر نشود
+     ۱) `atMs` ارسالی کلاینت (ترتیب واقعی حذف‌ها بین چند عملیات یک دسته حفظ شود)
+     ۲) ساعت سرور (`nowMs`) — سپر اصلی در برابر clock skew
+     ۳) `updatedAt` فعلی همان ردیف روی سرور — تا حذف، از نسخه‌ی موجود قدیمی‌تر نشود
 
    نتیجه: حذف همیشه «دیرتر» از هر چیزی است که تا此刻 روی سرور بوده، پس هیچ
    push بعدی با مهر قدیمی‌تر نمی‌تواند آن را برگرداند. (کلاینتی با ساعتِ
@@ -11832,13 +11866,13 @@ function deleteEntity(ss, entityName, id, atMs) {
 
   // نوشتن **اتمی** (رفع ایراد #20)
   //
-  // پیش‌تر سه سلول با سه \`setValue\` جداگانه نوشته می‌شدند. چون \`db.pull\` عمداً
+  // پیش‌تر سه سلول با سه `setValue` جداگانه نوشته می‌شدند. چون `db.pull` عمداً
   // قفل نمی‌گیرد (فقط می‌خواند و قفل‌کردنش توان عملیاتی را نصف می‌کرد)، یک pull
-  // هم‌زمان می‌توانست ردیف را وسط نوشتن ببیند: مثلاً \`deleted=true\` ولی
-  // \`updatedAt\` هنوز قدیمی — که در کلاینت به‌شکل «رکورد حذف شده اما مهرش از
+  // هم‌زمان می‌توانست ردیف را وسط نوشتن ببیند: مثلاً `deleted=true` ولی
+  // `updatedAt` هنوز قدیمی — که در کلاینت به‌شکل «رکورد حذف شده اما مهرش از
   // نسخه‌ی محلی قدیمی‌تر است» ظاهر می‌شد.
   //
-  // حالا کل ردیف با یک \`setValues\` نوشته می‌شود، پس خواننده یا ردیف کاملاً
+  // حالا کل ردیف با یک `setValues` نوشته می‌شود، پس خواننده یا ردیف کاملاً
   // قدیمی را می‌بیند یا کاملاً جدید را؛ حالت میانی وجود ندارد.
   var cur = readRowAt_(ss, entityName, rowIndex) || {};
   var ts = Math.max(toMs(atMs) || 0, nowMs(), toMs(cur.updatedAt) || 0);
@@ -11939,7 +11973,7 @@ function weakKeyReason_(key) {
     return "کلید API آنتروپی کافی ندارد (فقط " + distinct +
       " نویسه‌ی متمایز؛ حداقل " + MIN_BOOTSTRAP_KEY_DISTINCT + " لازم است).";
   }
-  if (/^[a-zA-Z\\u0600-\\u06FF]+$/.test(k) && k.toLowerCase() === k.toUpperCase()) {
+  if (/^[a-zA-Z\u0600-\u06FF]+$/.test(k) && k.toLowerCase() === k.toUpperCase()) {
     // بدون عدد/نماد — قابل قبول است ولی هشدار ثبت می‌شود
     Logger.log("checkApiKey: کلید bootstrap فقط حرف دارد؛ کلید ترکیبی قوی‌تر است.");
   }
@@ -12014,7 +12048,7 @@ function checkRateLimit(key) {
    ۶-ب. نشست کاربر و کنترل دسترسی مبتنی بر نقش (RBAC سمت سرور)
    =====================================================================
    قبل از این نسخه، صفحات «تنظیمات» و «کاربران» فقط سمت کلاینت (React) با
-   \`if (!perms.isAdmin) return <NoAccess/>\` محافظت می‌شدند. چون تمام درخواست‌ها
+   `if (!perms.isAdmin) return <NoAccess/>` محافظت می‌شدند. چون تمام درخواست‌ها
    با یک API_KEY مشترکِ کل سازمان امضا می‌شوند (نه با هویت شخصی)، هر کاربری که
    آن کلید را در مرورگر خودش می‌بیند (DevTools → Network/Application) می‌توانست
    مستقیماً به وب‌سرویس درخواست بزند و همان محدودیت را دور بزند — مثلاً نقش خودش
@@ -12383,7 +12417,7 @@ var WRITE_ACTIONS = {
   "users.get": false, "auth.login": false, "list_records": false, "export_zip": false,
   "invites.list": false, "records.signatures": false,
   // کار طولانی درایو/PDF؛ قفل فقط دور نوشتن شیت (داخل handleSaveRecord) گرفته می‌شود
-  "save_record": false, "record": false, "save_pdf": false, "save_html_pdf": false, "backup": false
+  "save_record": false, "record": false, "save_pdf": false, "save_html_pdf": false, "render_pdf": false, "backup": false
 };
 
 function routeAction(action, body, envelope) {
@@ -12432,6 +12466,7 @@ function routeAction(action, body, envelope) {
     case "settings.set":     return handleSettingsSet(ss, body);
 
     // ---- سازگاری با نسخه ۷ ----
+    case "render_pdf":       return handleRenderPdf(body);
     case "save_record": case "record": case "save_pdf": case "save_html_pdf":
       return handleSaveRecord(ss, rootName, body);
     case "backup":           return handleBackup(rootName, body);
@@ -12771,7 +12806,7 @@ function handleCategoriesSet(ss, body) {
 }
 
 /**
- * منطق واقعی جایگزینی کامل دسته‌بندی‌ها، بدون بررسی نقش. \`handleCategoriesSet\`
+ * منطق واقعی جایگزینی کامل دسته‌بندی‌ها، بدون بررسی نقش. `handleCategoriesSet`
  * (مسیر عادی کلاینت از راه db.push/routeAction) این تابع را بعد از تأیید
  * guardEntityWrite_ صدا می‌زند. مسیرهای مهاجرت/import کل پایگاه
  * (handleLegacyCloudPush، importLegacyData) هم مستقیماً از همینجا استفاده
@@ -13165,12 +13200,12 @@ function notifyCriticalFailure(rec, fileUrl) {
     return;
   }
   var subject = "⚠ بازرسی ناموفق حیاتی: " + (rec.assetCode || "") + " - " + (rec.templateName || rec.templateTitle || "");
-  var bodyTxt = "یک بازرسی با نتیجه «ناموفق حیاتی» ثبت شد.\\n\\n" +
-    "تجهیز: " + (rec.assetCode || "—") + "\\n" +
-    "بازرس: " + (rec.inspectorName || rec.inspector || "—") + "\\n" +
-    "درصد: " + (rec.percent || 0) + "%\\n" +
-    (countNaItems_(rec) ? "آیتم «کاربرد ندارد»: " + countNaItems_(rec) + "\\n" : "") +
-    "زمان: " + toJalaliDateTime(rec.completedAt || new Date()) + "\\n" +
+  var bodyTxt = "یک بازرسی با نتیجه «ناموفق حیاتی» ثبت شد.\n\n" +
+    "تجهیز: " + (rec.assetCode || "—") + "\n" +
+    "بازرس: " + (rec.inspectorName || rec.inspector || "—") + "\n" +
+    "درصد: " + (rec.percent || 0) + "%\n" +
+    (countNaItems_(rec) ? "آیتم «کاربرد ندارد»: " + countNaItems_(rec) + "\n" : "") +
+    "زمان: " + toJalaliDateTime(rec.completedAt || new Date()) + "\n" +
     (fileUrl ? "لینک فایل: " + fileUrl : "");
   MailApp.sendEmail(adminEmail, subject, bodyTxt);
 }
@@ -13178,6 +13213,58 @@ function notifyCriticalFailure(rec, fileUrl) {
 /* =====================================================================
    ۱۱. ذخیره‌ی PDF سابقه (سازگار با نسخه ۷ + مسیر جدید pdfBase64)
    ===================================================================== */
+
+/* =====================================================================
+   ۱۱-ب. رندر PDF رسمی سمت سرور برای خروجی‌های دانلودی
+   ---------------------------------------------------------------------
+   این مسیر فایل موقت Drive نمی‌سازد. HTML احراز‌شده مستقیماً به PDF تبدیل
+   می‌شود و PDF واقعی (متن قابل انتخاب/جست‌وجو) به کلاینت برمی‌گردد.
+   ===================================================================== */
+function handleRenderPdf(data) {
+  data = data || {};
+  var html = String(data.html || "");
+  if (!html || html.length < 20) return err("محتوای HTML برای ساخت PDF خالی است.");
+  if (html.length > 8000000) return err("حجم گزارش برای ساخت PDF بیش از حد مجاز است؛ بازه را کوچک‌تر کنید.");
+
+  // HTML از کاربر/کلاینت می‌آید؛ اسکریپت و event handlerها نباید وارد موتور تبدیل شوند.
+  html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+             .replace(/\s+on[a-z]+\s*=\s*([\"']).*?\1/gi, "");
+
+  var css = String(data.style || "") + "\n" +
+    "@page{size:A4 portrait;margin:12mm;}" +
+    "html,body{margin:0;padding:0;background:#fff;color:#0f172a;direction:rtl;}" +
+    "body{font-family:Tahoma,Arial,sans-serif;font-size:11pt;line-height:1.55;}" +
+    ".report{width:100%;box-sizing:border-box;page-break-inside:auto;break-inside:auto;}" +
+    ".report:not(:first-child){page-break-before:always;break-before:page;}" +
+    ".hdr,.summary,.sigs,.photo-grid{display:block!important;}" +
+    ".hdr-text{display:block!important;}" +
+    ".summary>div{display:block;margin:3px 0;}" +
+    ".sig-box{display:block!important;width:100%;box-sizing:border-box;margin:0 0 8px;}" +
+    ".photo-grid img,.photo-ext{display:inline-block!important;vertical-align:top;margin:0 0 6px 6px;}" +
+    "table{width:100%;table-layout:fixed;border-collapse:collapse;page-break-inside:auto;}" +
+    "table.meta td,table.results td,table.results th{overflow-wrap:anywhere;word-break:break-word;}" +
+    "table.results th:nth-child(1),table.results td:nth-child(1){width:44%;}" +
+    "table.results th:nth-child(2),table.results td:nth-child(2){width:24%;}" +
+    "table.results th:nth-child(3),table.results td:nth-child(3){width:18%;}" +
+    "table.results th:nth-child(4),table.results td:nth-child(4){width:14%;}" +
+    "thead{display:table-header-group;}" +
+    "tr{page-break-inside:avoid;page-break-after:auto;}" +
+    ".notes{page-break-inside:avoid;}" +
+    ".sigs,.photos{page-break-inside:auto;break-inside:auto;}" +
+    ".sig-box,.photo-grid img,.photo-ext{page-break-inside:avoid;break-inside:avoid;}" +
+    "img{max-width:100%;}";
+
+  var full = '<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>' + css +
+             '</style></head><body>' + html + '</body></html>';
+  try {
+    var blob = Utilities.newBlob(full, MimeType.HTML, "render.html").getAs(MimeType.PDF);
+    var bytes = blob.getBytes();
+    if (!bytes || bytes.length < 1000) return err("موتور PDF سرور خروجی معتبری تولید نکرد.");
+    return { ok:true, status:"success", pdfBase64:Utilities.base64Encode(bytes), bytes:bytes.length };
+  } catch (e) {
+    return err("ساخت PDF سمت سرور ناموفق بود: " + (e && e.message ? e.message : String(e)));
+  }
+}
 
 function handleSaveRecord(ss, rootName, data) {
   var rec = data.record;
@@ -13187,7 +13274,7 @@ function handleSaveRecord(ss, rootName, data) {
 
   var catFolder = getRecordFolder_(rootName, d, cat);
 
-  var jDateStr = toJalaliDate(d).replace(/\\//g, "-");
+  var jDateStr = toJalaliDate(d).replace(/\//g, "-");
   var assetPart = rec.assetCode ? cleanName(rec.assetCode, 30) + "_" : "";
   var titlePart = cleanName(rec.templateTitle || rec.templateName || "checklist", 50);
   var idPart = String(rec.id || "").slice(-6);
@@ -13265,7 +13352,7 @@ function handleSaveRecord(ss, rootName, data) {
 }
 
 function saveBase64Pdf(folder, baseName, pdfBase64) {
-  var bytes = Utilities.base64Decode(String(pdfBase64).replace(/^data:application\\/pdf;base64,/, ""));
+  var bytes = Utilities.base64Decode(String(pdfBase64).replace(/^data:application\/pdf;base64,/, ""));
   var blob = Utilities.newBlob(bytes, MimeType.PDF, baseName + ".pdf");
   var existing = folder.getFilesByName(baseName + ".pdf");
   if (existing.hasNext()) {
@@ -13419,7 +13506,7 @@ function buildLegacySnapshot(ss) {
 function handleBackup(rootName, body) {
   var rootFolder = getOrCreateFolder(DriveApp.getRootFolder(), rootName);
   var backupFolder = getOrCreateFolder(rootFolder, "پشتیبان کامل");
-  var backupName = "پشتیبان_" + toJalaliDate(new Date()).replace(/\\//g, "-") + "_" + nowMs() + ".json";
+  var backupName = "پشتیبان_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + nowMs() + ".json";
   var payload = body.payload || body.data || {};
   var backupFile = backupFolder.createFile(backupName, JSON.stringify(payload, null, 2), MimeType.PLAIN_TEXT);
   purgeOldBackups(backupFolder, 20);
@@ -13433,7 +13520,7 @@ function purgeOldBackups(folder, keep) {
   while (files.hasNext()) {
     var f = files.next();
     var n = f.getName();
-    if (!/^پشتیبان_\\d{4}-\\d{2}-\\d{2}_\\d+\\.json$/.test(n)) continue; // فایل دستی کاربر حفظ می‌شود
+    if (!/^پشتیبان_\d{4}-\d{2}-\d{2}_\d+\.json$/.test(n)) continue; // فایل دستی کاربر حفظ می‌شود
     list.push(f);
   }
   list.sort(function (a, b) { return b.getDateCreated().getTime() - a.getDateCreated().getTime(); });
@@ -13449,7 +13536,7 @@ function handleLegacyListRecords(ss, rootName, body) {
 function handleLegacyDeleteRecord(body) {
   var fileUrl = body.fileUrl;
   if (!fileUrl) return err("fileUrl ارسال نشده است.");
-  var idMatch = String(fileUrl).match(/[-\\w]{25,}/);
+  var idMatch = String(fileUrl).match(/[-\w]{25,}/);
   if (!idMatch) return err("شناسه فایل از روی لینک قابل استخراج نیست.");
   try {
     DriveApp.getFileById(idMatch[0]).setTrashed(true);
@@ -13466,7 +13553,7 @@ function handleLegacyApproveRecord(rootName, body) {
     approverName: body.approverName || "—", note: body.note || "",
     approvedAt: toJalaliDateTime(new Date())
   };
-  var name = "تاییدیه_" + toJalaliDate(new Date()).replace(/\\//g, "-") + "_" + String(body.recordId || "").slice(-6) + ".json";
+  var name = "تاییدیه_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + String(body.recordId || "").slice(-6) + ".json";
   var file = approvalFolder.createFile(name, JSON.stringify(entry, null, 2), MimeType.PLAIN_TEXT);
   return { ok: true, status: "success", message: "تاییدیه ثبت شد.", fileUrl: file.getUrl(), entry: entry };
 }
@@ -13646,7 +13733,7 @@ function maintenancePurgeTombstones(days) {
   Logger.log(JSON.stringify(removed));
   return removed;
 }
-`;
+
 /*__CODE_GS_END__*/
 
 /* @core-start: transport */
@@ -14137,7 +14224,7 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify, opts) {
   //   ✓ بعد از امضا، گوشی دیگر درگیر لود کتابخانه‌ی ۲MB و رندر بوم نیست
   //     → همگام‌سازی سریع‌تر تمام می‌شود
   //   ✓ PDF درایو با متن واقعی (نه عکس) و چیدمان بلوکیِ کامل ساخته می‌شود
-  const serverOnly = !!(opts && opts.serverOnly);
+  const serverOnly = true;
   const bodyHtml = recordReportHtml(await withLightPhotos(record), org);
   const pdfBase64 = serverOnly ? null : await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   const serverStyle = pdfBase64 ? '' : SERVER_FALLBACK_STYLE;
