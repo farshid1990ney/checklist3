@@ -9299,6 +9299,7 @@ const REPORT_STYLE = `
   table.meta { width:100%; table-layout:fixed; border-collapse:collapse; margin-bottom:12px; font-size:11px; }
   table.meta td { border:1px solid #cbd5e1; padding:5px 7px; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
   table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
+  table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
   table.meta td:nth-child(even) { width:35%; }
   table.results { width:100%; table-layout:fixed; border-collapse:collapse; font-size:11px; margin-bottom:10px; }
   table.results th, table.results td { border:1px solid #cbd5e1; padding:5px 7px; text-align:right; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
@@ -9312,24 +9313,24 @@ const REPORT_STYLE = `
   .summary { display:block; font-size:12px; margin-bottom:8px; }
   .summary > div { display:block; margin:3px 0; }
   .notes { font-size:11px; background:#f8fafc; padding:7px 9px; border:1px solid #e2e8f0; border-radius:5px; margin-bottom:10px; page-break-inside:avoid; }
-  .sigs { display:block; margin-top:14px; page-break-inside:auto; break-inside:auto; }
+  .sigs { display:block; margin-top:14px; page-break-inside:avoid; }
   .sig-box { display:block; width:100%; border:1px solid #cbd5e1; border-radius:6px; padding:8px; text-align:center; margin-bottom:8px; page-break-inside:avoid; }
   .sig-title { font-size:10px; color:#64748b; margin-bottom:4px; }
   .sig-box img { max-width:100%; height:52px; object-fit:contain; }
   .sig-name { font-size:10px; margin-top:3px; }
   .sig-onsite { font-size:9px; color:#0369a1; margin-top:2px; }
   .sig-empty { font-size:10px; color:#94a3b8; padding:16px 0; }
-  .photos { margin-top:12px; page-break-inside:auto; break-inside:auto; }
+  .photos { margin-top:12px; page-break-inside:avoid; }
   .photos > b { font-size:11px; display:block; margin-bottom:5px; }
   .photo-grid { display:block; }
   .photo-grid img { display:inline-block; vertical-align:top; width:58mm; height:43mm; object-fit:cover; border:1px solid #cbd5e1; border-radius:4px; margin:0 0 5px 5px; }
   .photo-ext { display:inline-flex; vertical-align:top; width:58mm; height:43mm; border:1px dashed #cbd5e1; border-radius:4px; font-size:9px; color:#94a3b8; align-items:center; justify-content:center; text-align:center; padding:5px; margin:0 0 5px 5px; }
-  .pdf-page-break { display:none !important; }
+  .pdf-page-break { display:block; height:0; page-break-before:always; break-before:page; }
 `;
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r6';
+const APP_BUILD = 'B-14050626r9';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -9461,38 +9462,29 @@ function rangedPdfFileName(prefix, count) {
 async function downloadSequentialPdf(records, org, notify) {
   if (!Array.isArray(records) || !records.length) return false;
   if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)…', 'info');
-
-  // مسیر اصلی: PDF واقعی سمت سرور؛ متن قابل انتخاب/جست‌وجو و صفحه‌بندی A4.
   try {
     const cfg = resolveCloudConfig(org || {});
-    const light = await Promise.all(records.map(withLightPhotos));
-    const body = light.map(r => recordReportHtml(r, org)).join('');
-    if (cfg && cfg.url && cfg.apiKey && body.length <= 6500000) {
-      const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
-        { html: body, style: REPORT_STYLE + SERVER_FALLBACK_STYLE }, cloudFolderName(org));
-      if (res && res.ok && res.pdfBase64) {
-        downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
-        if (notify) notify('PDF واقعی و با کیفیت اصلی (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
-        return true;
-      }
-    }
-  } catch (e) {
-    console.warn('server PDF failed; falling back to browser renderer', e);
-  }
-
-  // fallback برای حالت آفلاین/سرور قدیمی یا درخواست بزرگ.
-  try {
-    const light = await Promise.all(records.map(withLightPhotos));
-    const b64 = await htmlToPdfBase64(light.map(r => recordReportHtml(r, org)), REPORT_STYLE);
-    if (!b64) {
-      if (notify) notify(pdfFailureMessage(), 'error');
+    if (!(cfg && cfg.url && cfg.apiKey)) {
+      if (notify) notify('برای دانلود PDF دقیق، اتصال سرور لازم است. ابتدا اتصال Google Apps Script را بررسی کنید.', 'error');
       return false;
     }
-    downloadBase64Pdf(b64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
-    if (notify) notify('PDF پشت‌سرهم (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
+    const preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
+    const hydrated = await hydrateRecordsForPdf(records, cfg.url, cfg.apiKey);
+    const light = await Promise.all(hydrated.map(withLightPhotos));
+    const body = light.map(r => recordReportHtml(r, preparedOrg)).join('');
+    if (body.length > 6500000) {
+      if (notify) notify('حجم گزارش برای یک PDF واحد زیاد است؛ تعداد برگه‌ها یا بازه را کمتر کنید.', 'error');
+      return false;
+    }
+    const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
+      { html: body, style: REPORT_STYLE + SERVER_FALLBACK_STYLE }, cloudFolderName(preparedOrg));
+    if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
+    if (!downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length))) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
+    if (notify) notify('PDF واقعی و متن‌محور (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
     return true;
   } catch (e) {
-    if (notify) notify('ساخت PDF ناموفق بود: ' + (e.message || e), 'error');
+    lastPdfError = (e && e.message) ? e.message : String(e);
+    if (notify) notify('ساخت PDF ناموفق بود: ' + lastPdfError, 'error');
     return false;
   }
 }
@@ -9554,7 +9546,8 @@ const NC_PAGE_STYLE = `
 /** آیتم‌های مغایر یک برگه: ابتدا آیتم‌های «نمره‌ی صفر» (حیاتی‌ها اول)؛ اگر نبود، آیتم‌های «کسر امتیاز».
  *  آیتم‌های اطلاعاتی (earned=null) و «کاربرد ندارد» هرگز مغایر حساب نمی‌شوند. */
 function ncItemsOf(r) {
-  const scored = (r.details || []).filter(d => d && !d.na && Number(d.max) > 0 && d.earned !== null && d.earned !== undefined);
+  const details = Array.isArray(r && r.details) ? r.details : [];
+  const scored = details.filter(d => d && !d.na && Number(d.max) > 0 && d.earned !== null && d.earned !== undefined);
   let items = scored.filter(d => Number(d.earned) === 0);
   let partial = false;
   if (!items.length) { items = scored.filter(d => Number(d.earned) < Number(d.max)); partial = true; }
@@ -9729,29 +9722,161 @@ async function buildNcPages(ncRecords, org, rangeLabel) {
   }
 }
 
-/** ساخت و دانلود PDF گزارش عدم انطباق‌ها */
+/** HTML واقعیِ گزارش عدم انطباق برای موتور PDF سمت سرور.
+ *  این مسیر عمداً از صفحه‌های ثابت 794px و html2canvas استفاده نمی‌کند؛
+ *  موتور PDF خودش A4 را صفحه‌بندی می‌کند تا عرض گزارش کامل باشد و جدول‌ها
+ *  به‌صورت طبیعی بین صفحات ادامه پیدا کنند.
+ */
+function buildNcServerHtml(ncRecords, org, rangeLabel) {
+  const esc = escapeHtml;
+  const fa = (v) => toPersianDigits(String(v === undefined || v === null ? '' : v));
+  const recs = ncRecords.map(r => Object.assign({ r }, ncItemsOf(r)));
+  const total = recs.length;
+  const critRecs = recs.filter(x => !!x.r.criticalFail || x.r.status === 'ناموفق (حیاتی)').length;
+  const totalItems = recs.reduce((s, x) => s + x.items.length, 0);
+  const critItems = recs.reduce((s, x) => s + x.items.filter(d => d.critical).length, 0);
+  const dateOf = (r) => r.dateJalali || String(r.date || '').split(' - ')[0] || gregorianToJalaliStr(r.completedAt) || '—';
+  const isCrit = (r) => !!r.criticalFail || r.status === 'ناموفق (حیاتی)';
+  const titleOf = (r) => esc(r.assetCode) + (r.assetTitle || r.assetName ? ' — ' + esc(r.assetTitle || r.assetName) : '');
+  const badge = (r) => '<span class="nc-badge' + (isCrit(r) ? ' crit' : '') + '">' + esc(r.status) + ' — ' + fa(r.percent) + '٪</span>';
+  const valTxt = (d) => d.value === false ? 'تأیید نشد'
+    : (d.value === undefined || d.value === null || d.value === '' ? 'بدون پاسخ' : esc(fa(typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : d.value)));
+
+  const freq = new Map();
+  recs.forEach(x => { const seen = new Set(); x.items.forEach(d => { const k = String(d.label || '').trim(); if (k && !seen.has(k)) { seen.add(k); freq.set(k, (freq.get(k) || 0) + 1); } }); });
+  const top = [...freq.entries()].filter(e => e[1] >= 2).sort((a,b) => b[1] - a[1]).slice(0, 8);
+
+  let h = '';
+  h += '<section class="nc-report">';
+  h += '<div class="nc-hdr">';
+  if (org && org.logoDataUrl) h += '<img class="nc-logo" src="' + esc(org.logoDataUrl) + '" />';
+  h += '<div class="nc-hdr-text"><div class="nc-org">' + esc((org && org.orgName) || '') + '</div><div class="nc-sub">گزارش عدم انطباق‌های بازرسی</div></div>';
+  h += '<div class="nc-hdr-meta"><div>بازه / فیلتر: <b>' + esc(fa(rangeLabel || 'همه')) + '</b></div><div>تاریخ تهیه: <b>' + esc(fa(gregorianToJalaliStr(new Date()))) + '</b></div></div></div>';
+
+  h += '<table class="nc-kpis"><tr>' +
+    '<td><b>' + fa(total) + '</b><span>برگه دارای عدم انطباق</span></td>' +
+    '<td class="bad"><b>' + fa(critRecs) + '</b><span>ناموفق حیاتی</span></td>' +
+    '<td><b>' + fa(total - critRecs) + '</b><span>ناموفق عادی</span></td>' +
+    '<td><b>' + fa(totalItems) + '</b><span>مجموع آیتم‌های مغایر</span></td>' +
+    '<td class="bad"><b>' + fa(critItems) + '</b><span>آیتم مغایر حیاتی</span></td>' +
+    '</tr></table>';
+
+  h += '<h2 class="nc-h2">فهرست برگه‌های عدم انطباق</h2>';
+  h += '<table class="nc-t nc-list"><colgroup><col style="width:7%"><col style="width:13%"><col style="width:25%"><col style="width:12%"><col style="width:17%"><col style="width:8%"><col style="width:10%"><col style="width:8%"></colgroup><thead><tr><th>ردیف</th><th>کد تجهیز</th><th>قالب چک‌لیست</th><th>تاریخ</th><th>بازرس</th><th>درصد</th><th>وضعیت</th><th>مغایرت</th></tr></thead><tbody>';
+  recs.forEach((x,i) => { h += '<tr><td class="c">' + fa(i+1) + '</td><td>' + esc(x.r.assetCode) + '</td><td>' + esc(x.r.templateName) + '</td><td class="c">' + esc(fa(dateOf(x.r))) + '</td><td>' + esc(x.r.inspectorName) + '</td><td class="c">' + fa(x.r.percent) + '٪</td><td class="c' + (isCrit(x.r) ? ' nc-crit' : '') + '">' + esc(isCrit(x.r) ? 'حیاتی' : 'ناموفق') + '</td><td class="c">' + fa(x.items.length) + '</td></tr>'; });
+  h += '</tbody></table>';
+
+  if (top.length) {
+    h += '<h2 class="nc-h2">پرتکرارترین عدم انطباق‌ها <small>(تعداد برگه‌هایی که این مورد در آن‌ها مغایر بوده)</small></h2>';
+    h += '<table class="nc-t"><colgroup><col style="width:9%"><col><col style="width:18%"></colgroup><thead><tr><th>ردیف</th><th>آیتم</th><th>تعداد برگه</th></tr></thead><tbody>';
+    top.forEach((e,i) => { h += '<tr><td class="c">' + fa(i+1) + '</td><td>' + esc(e[0]) + '</td><td class="c">' + fa(e[1]) + '</td></tr>'; });
+    h += '</tbody></table>';
+  }
+
+  h += '<h2 class="nc-h2">جزئیات عدم انطباق‌ها</h2>';
+  recs.forEach((x,idx) => {
+    const r = x.r;
+    h += '<section class="nc-rec">';
+    h += '<div class="nc-rec-title"><span>' + fa(idx+1) + '. ' + titleOf(r) + '</span>' + badge(r) + '</div>';
+    h += '<table class="nc-meta"><tr><td>قالب</td><td>' + esc(r.templateName) + '</td><td>بازرس</td><td>' + esc(r.inspectorName) + '</td></tr><tr><td>تاریخ</td><td>' + esc(fa(dateOf(r))) + '</td><td>' + (r.location ? 'محل' : 'مهلت') + '</td><td>' + esc(fa(r.location || r.dueDate || '—')) + '</td></tr></table>';
+    h += '<div class="nc-section-label">' + (x.partial ? 'آیتم‌های دارای کسر امتیاز' : 'آیتم‌های مغایر') + ' (' + fa(x.items.length) + ')</div>';
+    if (x.items.length) {
+      h += '<table class="nc-t nc-detail"><colgroup><col style="width:7%"><col><col style="width:18%"><col style="width:14%"><col style="width:10%"></colgroup><thead><tr><th>ردیف</th><th>آیتم</th><th>پاسخ ثبت‌شده</th><th>امتیاز</th><th>حیاتی</th></tr></thead><tbody>';
+      x.items.forEach((d,i) => { h += '<tr><td class="c">' + fa(i+1) + '</td><td>' + esc(d.label) + (d.note ? '<div class="nc-note">توضیح بازرس: ' + esc(d.note) + '</div>' : '') + '</td><td>' + valTxt(d) + '</td><td class="c">' + fa(Math.round(Number(d.earned) * 10) / 10) + ' از ' + fa(d.max) + '</td><td class="c' + (d.critical ? ' nc-crit' : '') + '">' + (d.critical ? 'بله' : 'خیر') + '</td></tr>'; });
+      h += '</tbody></table>';
+    } else {
+      h += '<div class="nc-empty">ریز آیتم‌های این برگه ثبت نشده یا در دسترس نیست؛ وضعیت کلی برگه «' + esc(r.status) + '» است.</div>';
+    }
+    if (r.notes) h += '<div class="nc-box"><b>یادداشت بازرس:</b> ' + esc(r.notes) + '</div>';
+    if (Array.isArray(r.photos) && r.photos.some(p => p && p.image)) { h += '<div class="nc-photos"><b>عکس‌های مستندات:</b><div class="nc-photo-grid">' + r.photos.filter(p => p && p.image).map(p => '<img src="' + esc(p.image) + '" />').join('') + '</div></div>'; }
+    h += '</section>';
+  });
+
+  h += '<div class="nc-manager"><h2 class="nc-h2">تأیید و بررسی مدیر</h2><table><tr><td>نام و نام خانوادگی:</td><td>امضا:</td><td>تاریخ:</td></tr></table></div>';
+  h += '</section>';
+  return h;
+}
+
+const NC_SERVER_STYLE = `
+  @page { size:A4 portrait; margin:12mm; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:#fff; color:#0f172a; direction:rtl; }
+  body { font-family:Tahoma,Arial,sans-serif; font-size:10.5pt; line-height:1.5; }
+  .nc-report { width:100%; max-width:none; }
+  .nc-hdr { display:table; width:100%; border-bottom:2px solid #0f172a; padding-bottom:8px; margin-bottom:10px; page-break-inside:avoid; }
+  .nc-hdr > * { display:table-cell; vertical-align:middle; }
+  .nc-logo { width:42mm; height:18mm; object-fit:contain; }
+  .nc-hdr-text { padding:0 8px; }
+  .nc-org { font-size:17px; font-weight:bold; }
+  .nc-sub { font-size:11px; color:#475569; margin-top:2px; }
+  .nc-hdr-meta { width:42mm; font-size:9.5px; text-align:left; line-height:1.8; }
+  .nc-kpis { width:100%; border-collapse:separate; border-spacing:5px; margin:0 0 8px; table-layout:fixed; page-break-inside:avoid; }
+  .nc-kpis td { border:1px solid #cbd5e1; border-radius:6px; padding:6px 3px; text-align:center; background:#f8fafc; }
+  .nc-kpis b { display:block; font-size:18px; line-height:1.3; }
+  .nc-kpis span { font-size:8.5px; color:#475569; }
+  .nc-kpis .bad b { color:#b91c1c; }
+  .nc-h2 { font-size:13px; font-weight:bold; margin:13px 0 6px; padding-right:7px; border-right:4px solid #0f172a; line-height:1.5; page-break-after:avoid; }
+  .nc-h2 small { font-size:9.5px; font-weight:normal; color:#64748b; }
+  table.nc-t { width:100%; border-collapse:collapse; table-layout:fixed; font-size:9.5px; margin-bottom:8px; }
+  table.nc-t th, table.nc-t td { border:1px solid #cbd5e1; padding:4px 5px; text-align:right; vertical-align:top; line-height:1.5; overflow-wrap:anywhere; word-break:break-word; }
+  table.nc-t th { background:#e2e8f0; font-weight:bold; vertical-align:middle; }
+  table.nc-t .c { text-align:center; }
+  thead { display:table-header-group; }
+  tr { page-break-inside:avoid; break-inside:avoid; page-break-after:auto; }
+  .nc-meta { width:100%; border-collapse:collapse; table-layout:fixed; margin:5px 0 7px; font-size:9.5px; }
+  .nc-meta td { border:1px solid #e2e8f0; padding:4px 6px; overflow-wrap:anywhere; }
+  .nc-meta td:nth-child(odd) { background:#f1f5f9; font-weight:bold; width:13%; }
+  .nc-rec { border-top:2px solid #0f172a; margin-top:12px; padding-top:6px; page-break-inside:auto; break-inside:auto; }
+  .nc-rec-title { display:table; width:100%; font-size:12px; font-weight:bold; line-height:1.5; page-break-after:avoid; }
+  .nc-rec-title > * { display:table-cell; vertical-align:middle; }
+  .nc-rec-title .nc-badge { text-align:left; width:34mm; }
+  .nc-badge { display:inline-block; padding:1px 7px; border-radius:9px; font-size:9px; background:#fef3c7; color:#92400e; white-space:nowrap; }
+  .nc-badge.crit { background:#fee2e2; color:#b91c1c; }
+  .nc-section-label { font-size:10px; font-weight:bold; margin:3px 0 4px; page-break-after:avoid; }
+  .nc-note { font-size:9px; color:#b45309; margin-top:2px; line-height:1.5; }
+  .nc-crit { color:#b91c1c; font-weight:bold; }
+  .nc-box { font-size:9.5px; line-height:1.6; background:#f8fafc; border:1px solid #e2e8f0; padding:6px 8px; margin-top:7px; page-break-inside:avoid; }
+  .nc-empty { font-size:9.5px; background:#f8fafc; border:1px solid #e2e8f0; padding:7px; margin-top:5px; }
+  .nc-photos { margin-top:7px; font-size:9.5px; page-break-inside:auto; } .nc-photo-grid { margin-top:4px; } .nc-photo-grid img { width:42mm; height:31mm; object-fit:contain; border:1px solid #cbd5e1; margin:0 0 5px 5px; vertical-align:top; page-break-inside:avoid; }
+  .nc-photos { margin-top:7px; font-size:9.5px; page-break-inside:auto; } .nc-photo-grid { margin-top:4px; } .nc-photo-grid img { width:42mm; height:31mm; object-fit:contain; border:1px solid #cbd5e1; margin:0 0 5px 5px; vertical-align:top; page-break-inside:avoid; }
+  .nc-manager { margin-top:16px; page-break-inside:avoid; }
+  .nc-manager table { width:100%; border-collapse:collapse; table-layout:fixed; }
+  .nc-manager td { border:1px solid #cbd5e1; height:18mm; padding:6px; vertical-align:top; font-size:9.5px; }
+  img { max-width:100%; }
+`;
+
+/** ساخت و دانلود PDF گزارش عدم انطباق‌ها — مسیر اصلی: HTML واقعی سمت سرور */
 async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
   if (!Array.isArray(ncRecords) || !ncRecords.length) {
     if (notify) notify('در این مجموعه عدم انطباقی وجود ندارد.', 'error');
     return false;
   }
   if (notify) notify('در حال ساخت گزارش عدم انطباق… چند لحظه صبر کنید.', 'info');
-  let pages;
-  try { pages = await buildNcPages(ncRecords, org || {}, rangeLabel); }
-  catch (e) {
-    console.error('صفحه‌بندی گزارش عدم انطباق ناموفق بود', e);
-    lastPdfFailure = 'build'; lastPdfError = (e && e.message) ? e.message : String(e);
-    if (notify) notify(pdfFailureMessage(), 'error');
+  try {
+    const cfg = resolveCloudConfig(org || {});
+    if (!(cfg && cfg.url && cfg.apiKey)) {
+      if (notify) notify('برای ساخت گزارش عدم انطباق دقیق، اتصال سرور لازم است.', 'error');
+      return false;
+    }
+    const preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
+    const hydrated = await hydrateRecordsForPdf(ncRecords, cfg.url, cfg.apiKey);
+    const light = await Promise.all(hydrated.map(withLightPhotos));
+    const html = buildNcServerHtml(light, preparedOrg, rangeLabel);
+    if (html.length > 6500000) {
+      if (notify) notify('حجم گزارش عدم انطباق برای یک PDF واحد زیاد است؛ فیلتر را محدودتر کنید.', 'error');
+      return false;
+    }
+    const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
+      { html: html, style: NC_SERVER_STYLE }, cloudFolderName(preparedOrg));
+    if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
+    if (!downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length))) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
+    if (notify) notify('گزارش عدم انطباق‌ها با قالب A4 و PDF متن‌محور دانلود شد.', 'success');
+    return true;
+  } catch (e) {
+    lastPdfError = (e && e.message) ? e.message : String(e);
+    if (notify) notify('ساخت گزارش عدم انطباق ناموفق بود: ' + lastPdfError, 'error');
     return false;
   }
-  const b64 = await htmlToPdfBase64(pages, NC_PAGE_STYLE, { pageCssH: NC_PAGE_H });
-  if (!b64) {
-    if (notify) notify(pdfFailureMessage(), 'error');
-    return false;
-  }
-  downloadBase64Pdf(b64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length));
-  if (notify) notify('گزارش عدم انطباق‌ها (' + toPersianDigits(ncRecords.length) + ' مورد، ' + toPersianDigits(pages.length) + ' صفحه) دانلود شد.', 'success');
-  return true;
 }
 
 /* ============================================================
@@ -11000,7 +11125,8 @@ function UsersPage() {
    ۱۷. کد کامل Google Apps Script (پل ارتباطی بدون نیاز به کلود)
    ============================================================ */
 /*__CODE_GS_START__*/
-/**
+// کد کامل Google Apps Script که در صفحه تنظیمات قابل کپی است.
+const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
  *  نسخه: 8.8
@@ -11096,7 +11222,7 @@ function UsersPage() {
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "8.9";
+var SERVER_VERSION = "9.0";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -11224,18 +11350,18 @@ function toMs(v) {
 
 /* تبدیل مقدار فیلتر تاریخ به epoch ms (رفع ایراد P3-۱۵).
 
-   `toMs` معمولی برای فیلترهای `from`/`to` کافی نیست: اگر فراخوان تاریخ شمسی
-   بفرستد (که در این سامانه طبیعی‌ترین ورودی است)، `Date.parse("1403/01/01")`
+   \`toMs\` معمولی برای فیلترهای \`from\`/\`to\` کافی نیست: اگر فراخوان تاریخ شمسی
+   بفرستد (که در این سامانه طبیعی‌ترین ورودی است)، \`Date.parse("1403/01/01")\`
    سال **۱۴۰۳ میلادی** را برمی‌گرداند — یعنی ۶۳۲ سال خطا. نتیجه‌اش این است که
    فیلتر یا همه‌چیز را برمی‌گرداند یا هیچ‌چیز را، بدون هیچ پیام خطایی.
 
-   حالا رشته‌ی `YYYY/MM/DD` با سالِ بازه‌ی شمسی (۱۳۰۰ تا ۱۵۰۰) به‌درستی تبدیل
-   می‌شود. `endOfDay` برای کرانِ بالای فیلتر (`to`) استفاده می‌شود تا «تا تاریخ
+   حالا رشته‌ی \`YYYY/MM/DD\` با سالِ بازه‌ی شمسی (۱۳۰۰ تا ۱۵۰۰) به‌درستی تبدیل
+   می‌شود. \`endOfDay\` برای کرانِ بالای فیلتر (\`to\`) استفاده می‌شود تا «تا تاریخ
    فلان» واقعاً کل آن روز را شامل شود، نه فقط لحظه‌ی نیمه‌شبِ اولش. */
 function toFilterMs_(v, endOfDay) {
   if (v === null || v === undefined || v === "") return 0;
   var s = String(v).trim();
-  var m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  var m = s.match(/^(\\d{4})[\\/\\-.](\\d{1,2})[\\/\\-.](\\d{1,2})$/);
   if (m) {
     var y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
     var dateOnly = true;
@@ -11279,8 +11405,8 @@ function safeJsonParse(text, fallback) {
 function cleanName(str, maxLen) {
   // نیم‌فاصله (U+200C) کاراکتر معتبر فارسی است و نباید حذف شود
   var s = String(str === null || str === undefined ? "" : str)
-    .replace(/[\\/:*?"<>|\r\n\t]/g, "_")
-    .replace(/\s+/g, " ")
+    .replace(/[\\\\/:*?"<>|\\r\\n\\t]/g, "_")
+    .replace(/\\s+/g, " ")
     .trim();
   var limit = maxLen || 80;
   if (s.length > limit) s = s.slice(0, limit);
@@ -11559,7 +11685,7 @@ function migrateHeader_(sh, sheetName, existing, header) {
     });
 
     // خواندن هم تکه‌تکه انجام می‌شود (رفع ایراد #21): پیش‌تر فقط نوشتن chunked
-    // بود ولی `getValues` کل شیت را یک‌جا در حافظه می‌آورد. برای شیت ۱۰٬۰۰۰
+    // بود ولی \`getValues\` کل شیت را یک‌جا در حافظه می‌آورد. برای شیت ۱۰٬۰۰۰
     // ردیفی با ۳۰ ستون یعنی ۳۰۰٬۰۰۰ سلول هم‌زمان در حافظه، که به سقف حافظه‌ی
     // Apps Script می‌خورد و مهاجرت کرش می‌کرد.
     var CHUNK = 500;
@@ -11673,14 +11799,14 @@ function readTable(ss, entityName, opts) {
 /* ---------------------------------------------------------------------------
    کش نگاشت id → rowIndex (رفع ایراد P1-۲)
 
-   پیش‌تر هر عملیاتِ یک `db.push` جداگانه کل ستون id را می‌خواند: با ۶۰ عملیات
+   پیش‌تر هر عملیاتِ یک \`db.push\` جداگانه کل ستون id را می‌خواند: با ۶۰ عملیات
    یعنی ۶۰ پیمایش کامل شیت. روی پایگاه ۵٬۰۰۰ رکوردی این ~۳۰۰٬۰۰۰ خواندن سلول
    در یک درخواست بود و به سقف زمانی ۶ دقیقه‌ای Apps Script می‌خورد.
 
    حالا نگاشت یک بار در نخستین مراجعه ساخته می‌شود و تا پایان درخواست زنده
    می‌ماند. چون حذف فیزیکی در جریان push اتفاق نمی‌افتد (فقط tombstone) و
-   `writeRow_` هنگام append نگاشت تازه را اضافه می‌کند، شماره‌ی ردیف‌ها معتبر
-   می‌ماند. کش فقط داخل `handleDbPush` فعال است؛ بقیه‌ی مسیرها مثل قبل کار
+   \`writeRow_\` هنگام append نگاشت تازه را اضافه می‌کند، شماره‌ی ردیف‌ها معتبر
+   می‌ماند. کش فقط داخل \`handleDbPush\` فعال است؛ بقیه‌ی مسیرها مثل قبل کار
    می‌کنند.
    --------------------------------------------------------------------------- */
 var ROW_INDEX_CACHE_ = null;
@@ -11830,15 +11956,15 @@ function upsertEntity(ss, entityName, incoming, options) {
 
 /* مهرِ زمانیِ tombstone (رفع ایراد P0-۳: نشت حذف)
 
-   اگر ساعت کلاینت عقب باشد و `atMs` با همان ساعتِ عقب فرستاده شود، tombstone با
-   `updatedAt` قدیمی ثبت می‌شد. بعداً اگر همان رکورد روی دستگاه دیگری زنده شود و
-   با `updatedAt` جدیدتر push گردد، LWW آن را برنده می‌کند و **رکورد حذف‌شده
+   اگر ساعت کلاینت عقب باشد و \`atMs\` با همان ساعتِ عقب فرستاده شود، tombstone با
+   \`updatedAt\` قدیمی ثبت می‌شد. بعداً اگر همان رکورد روی دستگاه دیگری زنده شود و
+   با \`updatedAt\` جدیدتر push گردد، LWW آن را برنده می‌کند و **رکورد حذف‌شده
    دوباره زنده می‌شود**.
 
    حالا مهر حذف هرگز از این سه مقدار کمتر نیست:
-     ۱) `atMs` ارسالی کلاینت (ترتیب واقعی حذف‌ها بین چند عملیات یک دسته حفظ شود)
-     ۲) ساعت سرور (`nowMs`) — سپر اصلی در برابر clock skew
-     ۳) `updatedAt` فعلی همان ردیف روی سرور — تا حذف، از نسخه‌ی موجود قدیمی‌تر نشود
+     ۱) \`atMs\` ارسالی کلاینت (ترتیب واقعی حذف‌ها بین چند عملیات یک دسته حفظ شود)
+     ۲) ساعت سرور (\`nowMs\`) — سپر اصلی در برابر clock skew
+     ۳) \`updatedAt\` فعلی همان ردیف روی سرور — تا حذف، از نسخه‌ی موجود قدیمی‌تر نشود
 
    نتیجه: حذف همیشه «دیرتر» از هر چیزی است که تا此刻 روی سرور بوده، پس هیچ
    push بعدی با مهر قدیمی‌تر نمی‌تواند آن را برگرداند. (کلاینتی با ساعتِ
@@ -11866,13 +11992,13 @@ function deleteEntity(ss, entityName, id, atMs) {
 
   // نوشتن **اتمی** (رفع ایراد #20)
   //
-  // پیش‌تر سه سلول با سه `setValue` جداگانه نوشته می‌شدند. چون `db.pull` عمداً
+  // پیش‌تر سه سلول با سه \`setValue\` جداگانه نوشته می‌شدند. چون \`db.pull\` عمداً
   // قفل نمی‌گیرد (فقط می‌خواند و قفل‌کردنش توان عملیاتی را نصف می‌کرد)، یک pull
-  // هم‌زمان می‌توانست ردیف را وسط نوشتن ببیند: مثلاً `deleted=true` ولی
-  // `updatedAt` هنوز قدیمی — که در کلاینت به‌شکل «رکورد حذف شده اما مهرش از
+  // هم‌زمان می‌توانست ردیف را وسط نوشتن ببیند: مثلاً \`deleted=true\` ولی
+  // \`updatedAt\` هنوز قدیمی — که در کلاینت به‌شکل «رکورد حذف شده اما مهرش از
   // نسخه‌ی محلی قدیمی‌تر است» ظاهر می‌شد.
   //
-  // حالا کل ردیف با یک `setValues` نوشته می‌شود، پس خواننده یا ردیف کاملاً
+  // حالا کل ردیف با یک \`setValues\` نوشته می‌شود، پس خواننده یا ردیف کاملاً
   // قدیمی را می‌بیند یا کاملاً جدید را؛ حالت میانی وجود ندارد.
   var cur = readRowAt_(ss, entityName, rowIndex) || {};
   var ts = Math.max(toMs(atMs) || 0, nowMs(), toMs(cur.updatedAt) || 0);
@@ -11973,7 +12099,7 @@ function weakKeyReason_(key) {
     return "کلید API آنتروپی کافی ندارد (فقط " + distinct +
       " نویسه‌ی متمایز؛ حداقل " + MIN_BOOTSTRAP_KEY_DISTINCT + " لازم است).";
   }
-  if (/^[a-zA-Z\u0600-\u06FF]+$/.test(k) && k.toLowerCase() === k.toUpperCase()) {
+  if (/^[a-zA-Z\\u0600-\\u06FF]+$/.test(k) && k.toLowerCase() === k.toUpperCase()) {
     // بدون عدد/نماد — قابل قبول است ولی هشدار ثبت می‌شود
     Logger.log("checkApiKey: کلید bootstrap فقط حرف دارد؛ کلید ترکیبی قوی‌تر است.");
   }
@@ -12048,7 +12174,7 @@ function checkRateLimit(key) {
    ۶-ب. نشست کاربر و کنترل دسترسی مبتنی بر نقش (RBAC سمت سرور)
    =====================================================================
    قبل از این نسخه، صفحات «تنظیمات» و «کاربران» فقط سمت کلاینت (React) با
-   `if (!perms.isAdmin) return <NoAccess/>` محافظت می‌شدند. چون تمام درخواست‌ها
+   \`if (!perms.isAdmin) return <NoAccess/>\` محافظت می‌شدند. چون تمام درخواست‌ها
    با یک API_KEY مشترکِ کل سازمان امضا می‌شوند (نه با هویت شخصی)، هر کاربری که
    آن کلید را در مرورگر خودش می‌بیند (DevTools → Network/Application) می‌توانست
    مستقیماً به وب‌سرویس درخواست بزند و همان محدودیت را دور بزند — مثلاً نقش خودش
@@ -12413,7 +12539,7 @@ function err(message, extra) {
 // کدام actionها «خواندنی» هستند (قفل نوشتن نمی‌گیرند)
 var WRITE_ACTIONS = {
   "db.pull": false, "db.revision": false, "bootstrap": false, "settings.get": false,
-  "records.list": false, "records.get": false, "records.signature": false,
+  "records.list": false, "records.get": false, "records.signature": false, "media.images": false,
   "users.get": false, "auth.login": false, "list_records": false, "export_zip": false,
   "invites.list": false, "records.signatures": false,
   // کار طولانی درایو/PDF؛ قفل فقط دور نوشتن شیت (داخل handleSaveRecord) گرفته می‌شود
@@ -12460,6 +12586,7 @@ function routeAction(action, body, envelope) {
     case "records.get":      return handleRecordGet(ss, body);
     case "records.signature": return handleSignatureGet(ss, body);
     case "records.signatures": return handleSignaturesBatch(ss, body);
+    case "media.images": return handleMediaBatchGet(body);
 
     case "categories.set":   return handleCategoriesSet(ss, body);
     case "settings.get":     return { ok: true, status: "success", settings: getSettings(ss) };
@@ -12806,7 +12933,7 @@ function handleCategoriesSet(ss, body) {
 }
 
 /**
- * منطق واقعی جایگزینی کامل دسته‌بندی‌ها، بدون بررسی نقش. `handleCategoriesSet`
+ * منطق واقعی جایگزینی کامل دسته‌بندی‌ها، بدون بررسی نقش. \`handleCategoriesSet\`
  * (مسیر عادی کلاینت از راه db.push/routeAction) این تابع را بعد از تأیید
  * guardEntityWrite_ صدا می‌زند. مسیرهای مهاجرت/import کل پایگاه
  * (handleLegacyCloudPush، importLegacyData) هم مستقیماً از همینجا استفاده
@@ -13123,6 +13250,22 @@ function saveDataUrlFile_(folder, subName, fileName, dataUrl) {
   return target.createFile(blob).getId();
 }
 
+function handleMediaBatchGet(body) {
+  var ids = body && body.fileIds;
+  if (!Array.isArray(ids)) return err("fileIds باید آرایه باشد.");
+  ids = ids.map(function (x) { return String(x || "").trim(); }).filter(Boolean).slice(0, 30);
+  var images = {};
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      var f = DriveApp.getFileById(ids[i]);
+      var mt = f.getMimeType() || "application/octet-stream";
+      if (mt.indexOf("image/") !== 0) continue;
+      images[ids[i]] = "data:" + mt + ";base64," + Utilities.base64Encode(f.getBlob().getBytes());
+    } catch (e) { /* فایل حذف شده/بدون دسترسی؛ از پاسخ حذف می‌شود */ }
+  }
+  return { ok:true, status:"success", images:images };
+}
+
 function handleSignatureGet(ss, body) {
   var fileId = body.fileId;
   if (!fileId) return err("fileId ارسال نشد.");
@@ -13200,12 +13343,12 @@ function notifyCriticalFailure(rec, fileUrl) {
     return;
   }
   var subject = "⚠ بازرسی ناموفق حیاتی: " + (rec.assetCode || "") + " - " + (rec.templateName || rec.templateTitle || "");
-  var bodyTxt = "یک بازرسی با نتیجه «ناموفق حیاتی» ثبت شد.\n\n" +
-    "تجهیز: " + (rec.assetCode || "—") + "\n" +
-    "بازرس: " + (rec.inspectorName || rec.inspector || "—") + "\n" +
-    "درصد: " + (rec.percent || 0) + "%\n" +
-    (countNaItems_(rec) ? "آیتم «کاربرد ندارد»: " + countNaItems_(rec) + "\n" : "") +
-    "زمان: " + toJalaliDateTime(rec.completedAt || new Date()) + "\n" +
+  var bodyTxt = "یک بازرسی با نتیجه «ناموفق حیاتی» ثبت شد.\\n\\n" +
+    "تجهیز: " + (rec.assetCode || "—") + "\\n" +
+    "بازرس: " + (rec.inspectorName || rec.inspector || "—") + "\\n" +
+    "درصد: " + (rec.percent || 0) + "%\\n" +
+    (countNaItems_(rec) ? "آیتم «کاربرد ندارد»: " + countNaItems_(rec) + "\\n" : "") +
+    "زمان: " + toJalaliDateTime(rec.completedAt || new Date()) + "\\n" +
     (fileUrl ? "لینک فایل: " + fileUrl : "");
   MailApp.sendEmail(adminEmail, subject, bodyTxt);
 }
@@ -13227,10 +13370,10 @@ function handleRenderPdf(data) {
   if (html.length > 8000000) return err("حجم گزارش برای ساخت PDF بیش از حد مجاز است؛ بازه را کوچک‌تر کنید.");
 
   // HTML از کاربر/کلاینت می‌آید؛ اسکریپت و event handlerها نباید وارد موتور تبدیل شوند.
-  html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
-             .replace(/\s+on[a-z]+\s*=\s*([\"']).*?\1/gi, "");
+  html = html.replace(/<script[\\s\\S]*?<\\/script>/gi, "")
+             .replace(/\\s+on[a-z]+\\s*=\\s*([\\"']).*?\\1/gi, "");
 
-  var css = String(data.style || "") + "\n" +
+  var css = String(data.style || "") + "\\n" +
     "@page{size:A4 portrait;margin:12mm;}" +
     "html,body{margin:0;padding:0;background:#fff;color:#0f172a;direction:rtl;}" +
     "body{font-family:Tahoma,Arial,sans-serif;font-size:11pt;line-height:1.55;}" +
@@ -13260,6 +13403,8 @@ function handleRenderPdf(data) {
     var blob = Utilities.newBlob(full, MimeType.HTML, "render.html").getAs(MimeType.PDF);
     var bytes = blob.getBytes();
     if (!bytes || bytes.length < 1000) return err("موتور PDF سرور خروجی معتبری تولید نکرد.");
+    var head = Utilities.newBlob(bytes.slice(0, Math.min(16, bytes.length))).getDataAsString();
+    if (head.slice(0,5) !== "%PDF-") return err("موتور PDF سرور فایل PDF معتبر برنگرداند.");
     return { ok:true, status:"success", pdfBase64:Utilities.base64Encode(bytes), bytes:bytes.length };
   } catch (e) {
     return err("ساخت PDF سمت سرور ناموفق بود: " + (e && e.message ? e.message : String(e)));
@@ -13274,23 +13419,23 @@ function handleSaveRecord(ss, rootName, data) {
 
   var catFolder = getRecordFolder_(rootName, d, cat);
 
-  var jDateStr = toJalaliDate(d).replace(/\//g, "-");
+  var jDateStr = toJalaliDate(d).replace(/\\//g, "-");
   var assetPart = rec.assetCode ? cleanName(rec.assetCode, 30) + "_" : "";
   var titlePart = cleanName(rec.templateTitle || rec.templateName || "checklist", 50);
   var idPart = String(rec.id || "").slice(-6);
   var baseName = (jDateStr + "_" + assetPart + titlePart + "_" + idPart).slice(0, 160);
 
   var mainFile;
-  if (data.pdfBase64 && String(data.pdfBase64).length > 200) {
-    // مسیر درست و دقیق: PDF در مرورگر کاربر (html2pdf.js) ساخته شده است
-    mainFile = saveBase64Pdf(catFolder, baseName, data.pdfBase64);
-  } else if (data.html && String(data.html).length > 20) {
-    // مسیر پشتیبان: تبدیل HTML به PDF توسط موتور گوگل
-    // توجه: Blob.getAs('application/pdf') روی HTML کار می‌کند، اما پشتیبانی
-    // CSS آن محدود است (flexbox/grid نه؛ table و inline style بله).
-    mainFile = createPdfFromHtml(catFolder, baseName, String(data.html), rec);
-  } else {
-    mainFile = catFolder.createFile(baseName + ".json", JSON.stringify(rec, null, 2), MimeType.PLAIN_TEXT);
+  try {
+    if (data.pdfBase64 && String(data.pdfBase64).length > 200) {
+      mainFile = saveBase64Pdf(catFolder, baseName, data.pdfBase64);
+    } else if (data.html && String(data.html).length > 20) {
+      mainFile = createPdfFromHtml(catFolder, baseName, String(data.html), rec);
+    } else {
+      return err("برای ثبت فایل این برگه، PDF یا HTML معتبر ارسال نشده است.");
+    }
+  } catch (ePdf) {
+    return err("ساخت/ذخیره PDF برگه ناموفق بود: " + (ePdf && ePdf.message ? ePdf.message : String(ePdf)));
   }
 
   // ثبت در شیت records هم (تا منبع حقیقت یکجا بماند)
@@ -13352,7 +13497,12 @@ function handleSaveRecord(ss, rootName, data) {
 }
 
 function saveBase64Pdf(folder, baseName, pdfBase64) {
-  var bytes = Utilities.base64Decode(String(pdfBase64).replace(/^data:application\/pdf;base64,/, ""));
+  var raw = String(pdfBase64 || "").replace(/^data:application\\/pdf;base64,/i, "");
+  var bytes;
+  try { bytes = Utilities.base64Decode(raw); } catch (e) { throw new Error("Base64 فایل PDF نامعتبر است."); }
+  if (!bytes || bytes.length < 1000) throw new Error("فایل PDF خالی یا بیش از حد کوچک است.");
+  var head = Utilities.newBlob(bytes.slice(0, Math.min(16, bytes.length))).getDataAsString();
+  if (head.slice(0,5) !== "%PDF-") throw new Error("فایل ارسالی PDF معتبر نیست.");
   var blob = Utilities.newBlob(bytes, MimeType.PDF, baseName + ".pdf");
   var existing = folder.getFilesByName(baseName + ".pdf");
   if (existing.hasNext()) {
@@ -13364,32 +13514,16 @@ function saveBase64Pdf(folder, baseName, pdfBase64) {
 }
 
 function createPdfFromHtml(folder, baseName, html, rec) {
-  try {
-    var htmlBlob = Utilities.newBlob(html, MimeType.HTML, baseName + ".html");
-    var pdfBlob = htmlBlob.getAs(MimeType.PDF);
-    pdfBlob.setName(baseName + ".pdf");
-    var existing = folder.getFilesByName(baseName + ".pdf");
-    if (existing.hasNext()) { var f = existing.next(); f.setContent(pdfBlob); return f; }
-    return folder.createFile(pdfBlob);
-  } catch (e) {
-    // آخرین راه: ساخت سند گوگل و تبدیل آن به PDF (جدول‌ها ساده می‌شوند)
-    var doc = DocumentApp.create(baseName);
-    try {
-      doc.getBody().setText("");
-      doc.getBody().appendParagraph(String(rec && rec.templateName ? rec.templateName : "گزارش بازرسی"));
-      doc.getBody().appendParagraph("تجهیز: " + String(rec && rec.assetCode ? rec.assetCode : "—"));
-      doc.getBody().appendParagraph("بازرس: " + String(rec && rec.inspectorName ? rec.inspectorName : "—"));
-      doc.getBody().appendParagraph("درصد موفقیت: " + String(rec && rec.percent ? rec.percent : 0) + "%");
-      doc.getBody().appendParagraph("توضیح: تبدیل HTML به PDF ممکن نشد؛ این نسخه خلاصه است.");
-      doc.saveAndClose();
-      var pdf = doc.getAs(MimeType.PDF).setName(baseName + ".pdf");
-      var file = folder.createFile(pdf);
-      DriveApp.getFileById(doc.getId()).setTrashed(true);
-      return file;
-    } catch (e2) {
-      return folder.createFile(baseName + ".html", html, MimeType.HTML);
-    }
-  }
+  var htmlBlob = Utilities.newBlob(html, MimeType.HTML, baseName + ".html");
+  var pdfBlob = htmlBlob.getAs(MimeType.PDF);
+  var bytes = pdfBlob.getBytes();
+  if (!bytes || bytes.length < 1000) throw new Error("موتور PDF خروجی خالی تولید کرد.");
+  var head = Utilities.newBlob(bytes.slice(0, Math.min(16, bytes.length))).getDataAsString();
+  if (head.slice(0,5) !== "%PDF-") throw new Error("موتور PDF فایل PDF معتبر تولید نکرد.");
+  pdfBlob.setName(baseName + ".pdf");
+  var existing = folder.getFilesByName(baseName + ".pdf");
+  if (existing.hasNext()) { var f = existing.next(); f.setContent(pdfBlob); return f; }
+  return folder.createFile(pdfBlob);
 }
 
 function recordToSpreadsheet(ss) {
@@ -13506,7 +13640,7 @@ function buildLegacySnapshot(ss) {
 function handleBackup(rootName, body) {
   var rootFolder = getOrCreateFolder(DriveApp.getRootFolder(), rootName);
   var backupFolder = getOrCreateFolder(rootFolder, "پشتیبان کامل");
-  var backupName = "پشتیبان_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + nowMs() + ".json";
+  var backupName = "پشتیبان_" + toJalaliDate(new Date()).replace(/\\//g, "-") + "_" + nowMs() + ".json";
   var payload = body.payload || body.data || {};
   var backupFile = backupFolder.createFile(backupName, JSON.stringify(payload, null, 2), MimeType.PLAIN_TEXT);
   purgeOldBackups(backupFolder, 20);
@@ -13520,7 +13654,7 @@ function purgeOldBackups(folder, keep) {
   while (files.hasNext()) {
     var f = files.next();
     var n = f.getName();
-    if (!/^پشتیبان_\d{4}-\d{2}-\d{2}_\d+\.json$/.test(n)) continue; // فایل دستی کاربر حفظ می‌شود
+    if (!/^پشتیبان_\\d{4}-\\d{2}-\\d{2}_\\d+\\.json$/.test(n)) continue; // فایل دستی کاربر حفظ می‌شود
     list.push(f);
   }
   list.sort(function (a, b) { return b.getDateCreated().getTime() - a.getDateCreated().getTime(); });
@@ -13536,7 +13670,7 @@ function handleLegacyListRecords(ss, rootName, body) {
 function handleLegacyDeleteRecord(body) {
   var fileUrl = body.fileUrl;
   if (!fileUrl) return err("fileUrl ارسال نشده است.");
-  var idMatch = String(fileUrl).match(/[-\w]{25,}/);
+  var idMatch = String(fileUrl).match(/[-\\w]{25,}/);
   if (!idMatch) return err("شناسه فایل از روی لینک قابل استخراج نیست.");
   try {
     DriveApp.getFileById(idMatch[0]).setTrashed(true);
@@ -13553,7 +13687,7 @@ function handleLegacyApproveRecord(rootName, body) {
     approverName: body.approverName || "—", note: body.note || "",
     approvedAt: toJalaliDateTime(new Date())
   };
-  var name = "تاییدیه_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + String(body.recordId || "").slice(-6) + ".json";
+  var name = "تاییدیه_" + toJalaliDate(new Date()).replace(/\\//g, "-") + "_" + String(body.recordId || "").slice(-6) + ".json";
   var file = approvalFolder.createFile(name, JSON.stringify(entry, null, 2), MimeType.PLAIN_TEXT);
   return { ok: true, status: "success", message: "تاییدیه ثبت شد.", fileUrl: file.getUrl(), entry: entry };
 }
@@ -13733,7 +13867,7 @@ function maintenancePurgeTombstones(days) {
   Logger.log(JSON.stringify(removed));
   return removed;
 }
-
+`
 /*__CODE_GS_END__*/
 
 /* @core-start: transport */
@@ -14178,6 +14312,73 @@ function shrinkDataUrl(dataUrl, maxDim, quality) {
     } catch (e) { resolve(dataUrl); }
   });
 }
+async function fetchExternalImages(fileIds, url, apiKey) {
+  const ids = [...new Set((Array.isArray(fileIds) ? fileIds : []).filter(Boolean).map(String))];
+  const out = {};
+  if (!ids.length || !url || !apiKey) return out;
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
+  for (const chunk of chunks) {
+    try {
+      const res = await Promise.race([
+        signedCall(url, apiKey, 'media.images', { fileIds: chunk }),
+        new Promise(r => setTimeout(() => r(null), 25000)),
+      ]);
+      if (res && res.ok && res.images) Object.assign(out, res.images);
+    } catch (e) { /* فایل گمشده/سرور قدیمی؛ باقی خروجی بدون آن تصویر ادامه می‌یابد */ }
+  }
+  return out;
+}
+
+async function hydrateRecordForPdf(record, url, apiKey) {
+  if (!record) return record;
+  const copy = Object.assign({}, record, {
+    signatures: Object.assign({}, record.signatures || {}),
+    photos: Array.isArray(record.photos) ? record.photos.map(p => p && typeof p === 'object' ? Object.assign({}, p) : p) : record.photos,
+  });
+  const ids = [];
+  Object.keys(copy.signatures || {}).forEach(role => {
+    const s = copy.signatures[role];
+    if (s && !s.image && s.fileId) ids.push(s.fileId);
+  });
+  (Array.isArray(copy.photos) ? copy.photos : []).forEach(p => {
+    if (p && !p.image && p.fileId) ids.push(p.fileId);
+  });
+  if (!ids.length) return copy;
+  const images = await fetchExternalImages(ids, url, apiKey);
+  Object.keys(copy.signatures || {}).forEach(role => {
+    const s = copy.signatures[role];
+    if (s && !s.image && s.fileId && images[s.fileId]) copy.signatures[role] = Object.assign({}, s, { image: images[s.fileId] });
+  });
+  if (Array.isArray(copy.photos)) copy.photos = copy.photos.map(p => (p && !p.image && p.fileId && images[p.fileId]) ? Object.assign({}, p, { image: images[p.fileId] }) : p);
+  return copy;
+}
+
+async function hydrateRecordsForPdf(records, url, apiKey) {
+  const list = Array.isArray(records) ? records : [];
+  const copies = list.map(r => Object.assign({}, r, { signatures: Object.assign({}, r && r.signatures || {}), photos: Array.isArray(r && r.photos) ? r.photos.map(p => p && typeof p === 'object' ? Object.assign({}, p) : p) : r && r.photos }));
+  const ids = [];
+  copies.forEach(rec => {
+    Object.keys(rec.signatures || {}).forEach(role => { const s = rec.signatures[role]; if (s && !s.image && s.fileId) ids.push(s.fileId); });
+    (Array.isArray(rec.photos) ? rec.photos : []).forEach(p => { if (p && !p.image && p.fileId) ids.push(p.fileId); });
+  });
+  const images = await fetchExternalImages(ids, url, apiKey);
+  copies.forEach(rec => {
+    Object.keys(rec.signatures || {}).forEach(role => { const s = rec.signatures[role]; if (s && !s.image && s.fileId && images[s.fileId]) rec.signatures[role] = Object.assign({}, s, { image: images[s.fileId] }); });
+    if (Array.isArray(rec.photos)) rec.photos = rec.photos.map(p => (p && !p.image && p.fileId && images[p.fileId]) ? Object.assign({}, p, { image: images[p.fileId] }) : p);
+  });
+  return copies;
+}
+
+async function hydrateOrgForPdf(org, url, apiKey) {
+  const out = Object.assign({}, org || {});
+  if (!out.logoDataUrl && out.logoFileId) {
+    const images = await fetchExternalImages([out.logoFileId], url, apiKey);
+    if (images[out.logoFileId]) out.logoDataUrl = images[out.logoFileId];
+  }
+  return out;
+}
+
 async function withLightPhotos(rec) {
   if (!rec || !Array.isArray(rec.photos) || !rec.photos.some(p => p && p.image)) return rec;
   const photos = await Promise.all(rec.photos.map(async p => (p && p.image) ? Object.assign({}, p, { image: await shrinkDataUrl(p.image, 480, 0.72) }) : p));
@@ -14190,15 +14391,19 @@ async function withLightPhotos(rec) {
  * دانلود می‌شود. اگر مرورگر Blob را نداشت، به data URL برمی‌گردیم.
  */
 function downloadBase64Pdf(b64, filename) {
+  const s = String(b64 || '').replace(/^data:application\/pdf;base64,/i, '').trim();
   try {
-    const bin = atob(b64);
+    const bin = atob(s);
+    if (bin.length < 1000 || bin.slice(0, 5) !== '%PDF-') throw new Error('خروجی دریافتی PDF معتبر نیست.');
     const arr = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([arr], { type: 'application/pdf' }));
     downloadDataUrl(url, filename);
     setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 30000);
+    return true;
   } catch (e) {
-    downloadDataUrl('data:application/pdf;base64,' + b64, filename);
+    lastPdfError = (e && e.message) ? e.message : String(e);
+    return false;
   }
 }
 
@@ -14225,7 +14430,9 @@ async function sendRecordToAppsScript(url, apiKey, record, org, notify, opts) {
   //     → همگام‌سازی سریع‌تر تمام می‌شود
   //   ✓ PDF درایو با متن واقعی (نه عکس) و چیدمان بلوکیِ کامل ساخته می‌شود
   const serverOnly = true;
-  const bodyHtml = recordReportHtml(await withLightPhotos(record), org);
+  const preparedOrg = await hydrateOrgForPdf(org || {}, url, apiKey);
+  const preparedRecord = await hydrateRecordForPdf(record, url, apiKey);
+  const bodyHtml = recordReportHtml(await withLightPhotos(preparedRecord), preparedOrg);
   const pdfBase64 = serverOnly ? null : await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
   const serverStyle = pdfBase64 ? '' : SERVER_FALLBACK_STYLE;
   const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}${serverStyle}</style></head><body>${bodyHtml}</body></html>`;
