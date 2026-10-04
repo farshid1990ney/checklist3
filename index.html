@@ -13565,10 +13565,12 @@ const SERVER_UPDATE_HOWTO = 'راه‌حل: «تنظیمات ← کپی کد س�
 
 /** علت آخرین شکست ساخت PDF: 'lib' = کتابخانه لود نشد، 'build' = رندر شکست خورد */
 let lastPdfFailure = '';
+let lastPdfError = '';   // پیام فنی آخرین خطا (برای عیب‌یابی؛ در پیام کاربر هم نمایش داده می‌شود)
 function pdfFailureMessage() {
-  return lastPdfFailure === 'lib'
+  const detail = lastPdfError ? ' [جزئیات فنی: ' + String(lastPdfError).slice(0, 120) + ']' : '';
+  return (lastPdfFailure === 'lib'
     ? 'ساخت PDF ممکن نشد: کتابخانه‌ی PDF از اینترنت بارگذاری نشد (اینترنت ضعیف یا CDN فیلتر است). دوباره امتحان کنید یا از «چاپ پشت‌سرهم» استفاده کنید.'
-    : 'ساخت PDF ناموفق بود (حافظه‌ی دستگاه کافی نبود یا تعداد برگه‌ها زیاد است). بازه‌ی کوچک‌تری انتخاب کنید یا از «چاپ پشت‌سرهم» استفاده کنید.';
+    : 'ساخت PDF ناموفق بود (حافظه‌ی دستگاه کافی نبود یا تعداد برگه‌ها زیاد است). بازه‌ی کوچک‌تری انتخاب کنید یا از «چاپ پشت‌سرهم» استفاده کنید.') + detail;
 }
 
 /** ساخت PDF سمت کلاینت (دقیق‌تر از تبدیل HTML در سرور) — رفع ایراد ۲-۵
@@ -13578,6 +13580,17 @@ function pdfFailureMessage() {
  *  در iOS)؛ سندهای تجمیعی با چند ده برگه‌ی ۵۷ آیتمی از این سقف رد می‌شدند و خروجی خالی می‌شد. */
 async function htmlToPdfBase64(innerHtml, styleCss) {
   lastPdfFailure = '';
+  lastPdfError = '';
+  // دستگاه کم‌حافظه (موبایل/iOS): بوم‌های کوچک‌تر و دسته‌های کوتاه‌تر، چون سقف حافظه‌ی بوم
+  // روی موبایل کم است و بوم‌های بلند ۱۳ مگاپیکسلی زود «حافظه کافی نبود» می‌دهند.
+  const isLowMem = (() => {
+    try {
+      const ua = navigator.userAgent || '';
+      return /iPhone|iPad|iPod|Android|Mobile/i.test(ua) || !!(navigator.deviceMemory && navigator.deviceMemory <= 4);
+    } catch (e) { return false; }
+  })();
+  const freeCanvas = (c) => { try { if (c) { c.width = 0; c.height = 0; } } catch (e) {} };
+  const tick = () => new Promise(r => setTimeout(r, 40));
   if (typeof window === 'undefined') return null;
   const partList = Array.isArray(innerHtml) ? innerHtml.filter(Boolean) : null;
   const fullHtml = partList ? partList.join('') : innerHtml;
@@ -13666,7 +13679,7 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
 
   // مقیاس تطبیقی: روی آیفون/iOS سقف اندازه‌ی canvas حدود ۱۶ مگاپیکسل است؛
   // کامل بودن مقدم بر وضوح است. سقف ۱٫۵ (به‌جای ۲): ~۲۵٪ سریع‌تر و ~۵۵٪ سبک‌تر.
-  const PIXEL_BUDGET = 13000000; // زیر سقف iOS با حاشیه‌ی امن
+  const PIXEL_BUDGET = isLowMem ? 7000000 : 13000000; // زیر سقف iOS/موبایل با حاشیه‌ی امن
   const PDF_MAX_SCALE = 1.5;
   const scaleFor = (H) => {
     const fit = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(H, 600)))));
@@ -13683,11 +13696,37 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
   });
 
   /* ---------- مسیر دسته‌ای: سند بلند با چند بخش مستقل ---------- */
-  const SINGLE_MAX_H = 9000;  // تا این ارتفاع (≈ ۸ صفحه) همان رندر یک‌تکه
+  const SINGLE_MAX_H = isLowMem ? 4500 : 9000;  // تا این ارتفاع همان رندر یک‌تکه
   // ارتفاع هر دسته (≈ ۱۰ صفحه) → مقیاس ~۱٫۱۷ و بوم ≤ ~۱۴٬۰۰۰px (زیر سقف ۳۲٬۷۶۷). در اندازه‌گیری،
   // دسته‌ی کوچک‌تر (۶۰۰۰) به‌خاطر هزینه‌ی ثابت هر دسته ~۲٫۵ برابر کندتر بود (۲۶٫۸ در برابر ~۱۱ ثانیه برای ۳۰ برگه).
-  const CHUNK_H = 12000;
-  const buildChunked = async (factor) => {
+  // افزودن یک بوم بلند به jsPDF به‌صورت صفحه‌به‌صفحه (با حاشیه‌ی opt.margin) و آزادسازی بوم صفحه
+  const addCanvasPages = (pdf, canvas, opt) => {
+    const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight();
+    const m = opt.margin;
+    const innerW = pw - m[1] - m[3], innerH = ph - m[0] - m[2];
+    const pxPageH = Math.max(1, Math.floor(canvas.width * innerH / innerW));
+    const n = Math.max(1, Math.ceil(canvas.height / pxPageH));
+    const pc = document.createElement('canvas');
+    pc.width = canvas.width;
+    try {
+      for (let i = 0; i < n; i++) {
+        const sy = i * pxPageH;
+        const h = Math.min(pxPageH, canvas.height - sy);
+        if (h <= 0) break;
+        pc.height = h;
+        const ctx = pc.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, pc.width, h);
+        ctx.drawImage(canvas, 0, sy, canvas.width, h, 0, 0, pc.width, h);
+        const img = pc.toDataURL('image/jpeg', opt.image.quality);
+        pdf.addPage();
+        pdf.addImage(img, 'JPEG', m[1], m[0], innerW, h * innerW / canvas.width);
+      }
+    } finally { freeCanvas(pc); }
+  };
+
+  // هر دسته با یک worker تازه رندر می‌شود؛ بومِ دسته بلافاصله آزاد می‌شود (قبلاً تا پایان کار در حافظه می‌ماند
+  // و روی موبایل بعد از چند دسته «حافظه کافی نبود» می‌داد). هر دسته در صورت شکست با مقیاس کمتر دوباره تلاش می‌شود.
+  const buildChunked = async (chunkH, factor) => {
     const probe = buildHolder(partList.map(p => '<div data-part="1">' + p + '</div>').join(''));
     let heights;
     try { heights = [...probe.querySelectorAll(':scope > [data-part]')].map(el => Math.max(1, el.offsetHeight)); }
@@ -13696,32 +13735,52 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     let cur = [], curH = 0;
     partList.forEach((p, i) => {
       const ph = heights[i] || 1000;
-      if (cur.length && curH + ph > CHUNK_H) { chunks.push({ html: cur.join(''), h: curH }); cur = []; curH = 0; }
+      if (cur.length && curH + ph > chunkH) { chunks.push({ html: cur.join(''), h: curH }); cur = []; curH = 0; }
       cur.push(p); curH += ph;
     });
     if (cur.length) chunks.push({ html: cur.join(''), h: curH });
-    let worker = null;
-    try {
-      for (const ch of chunks) {
+    let pdf = null;
+    for (const ch of chunks) {
+      let ok = false, sf = 1;
+      for (let attempt = 0; attempt < 3 && !ok; attempt++) {
         const holder = buildHolder(ch.html);
+        let canvas = null;
         try {
           await prepareHolder(holder);
-          const opt = optFor(Math.max(0.6, Math.round(scaleFor(ch.h) * factor * 100) / 100));
-          // زنجیره‌ی مستند html2pdf: همان jsPDF بین دسته‌ها حفظ می‌شود و هر دسته از صفحه‌ی تازه شروع می‌شود
-          worker = worker
-            ? worker.get('pdf').then(pdf => { pdf.addPage(); }).set(opt).from(holder).toContainer().toCanvas().toPdf()
-            : html2pdfLib().set(opt).from(holder).toPdf();
-          await worker;
-        } finally { removeHolder(holder); }
+          const opt = optFor(Math.max(0.5, Math.round(scaleFor(ch.h) * factor * sf * 100) / 100));
+          const w = html2pdfLib().set(opt).from(holder);
+          if (!pdf) {
+            // اولین دسته: مسیر اصلی html2pdf (jsPDF را همین می‌سازد)
+            const wk = w.toCanvas().toPdf();
+            await wk;
+            pdf = await wk.get('pdf');
+            canvas = await wk.get('canvas');
+          } else {
+            const wk = w.toCanvas();
+            await wk;
+            canvas = await wk.get('canvas');
+            addCanvasPages(pdf, canvas, opt);
+          }
+          ok = true;
+        } catch (e) {
+          lastPdfError = (e && e.message) ? e.message : String(e);
+          console.error('ساخت PDF (دسته ' + (attempt + 1) + ') ناموفق بود', e);
+          sf *= 0.7;
+        } finally { freeCanvas(canvas); removeHolder(holder); }
+        await tick();
       }
-      return await blobToValidB64(await worker.outputPdf('blob'));
-    } catch (e) {
-      console.error('ساخت PDF دسته‌ای ناموفق بود', e);
-      return null;
+      if (!ok) return null;
     }
+    try { return await blobToValidB64(pdf.output('blob')); }
+    catch (e) { lastPdfError = (e && e.message) ? e.message : String(e); return null; }
   };
   if (partList && partList.length > 1 && CONTENT_H > SINGLE_MAX_H) {
-    const out = (await buildChunked(1)) || (await buildChunked(0.7));
+    const plans = isLowMem ? [[6000, 1], [3500, 0.8], [2200, 0.65]] : [[12000, 1], [6000, 0.8], [3000, 0.65]];
+    let out = null;
+    for (const [chH, f] of plans) {
+      out = await buildChunked(chH, f);
+      if (out) break;
+    }
     if (!out) lastPdfFailure = 'build';
     return out;
   }
@@ -13734,6 +13793,7 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
       const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
       return await blobToValidB64(blob);
     } catch (e) {
+      lastPdfError = (e && e.message) ? e.message : String(e);
       console.error('ساخت PDF ناموفق بود', e);
       return null;
     } finally {
