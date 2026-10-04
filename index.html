@@ -3923,7 +3923,8 @@ const LIB_SOURCES = {
     ],
   },
 };
-const LIB_LOAD_TIMEOUT_MS = 12000;
+const LIB_HEDGE_MS = 8000;          // شروع منبع دوم، موازی با اولی
+const LIB_TOTAL_TIMEOUT_MS = 90000; // سقف کل انتظار برای یک کتابخانه
 const _libLoading = new Map();
 
 /** کتابخانه را در صورت نیاز لود می‌کند و global آن را برمی‌گرداند. */
@@ -3933,27 +3934,41 @@ function ensureLib(name) {
   if (typeof window !== 'undefined' && window[spec.global]) return Promise.resolve(window[spec.global]);
   if (_libLoading.has(name)) return _libLoading.get(name);
 
-  const p = (async () => {
-    let lastErr = null;
-    for (const url of spec.urls) {
-      try {
-        await new Promise((resolve, reject) => {
-          const el = document.createElement('script');
-          // سقف زمانی: اگر CDN فیلتر/کند باشد و نه خطا بدهد نه جواب، بدون این سقف
-          // کاربر دقیقه‌ها منتظر می‌ماند و منبع دوم هرگز امتحان نمی‌شد.
-          const timer = setTimeout(() => { el.onload = el.onerror = null; el.remove(); reject(new Error('زمان بارگذاری تمام شد: ' + url)); }, LIB_LOAD_TIMEOUT_MS);
-          el.src = url;
-          el.async = true;
-          el.onload = () => { clearTimeout(timer); resolve(); };
-          el.onerror = () => { clearTimeout(timer); el.remove(); reject(new Error('بارگذاری ناموفق: ' + url)); };
-          document.head.appendChild(el);
-        });
-        if (window[spec.global]) return window[spec.global];
-        lastErr = new Error('کتابخانه بار شد ولی ' + spec.global + ' تعریف نشد');
-      } catch (e) { lastErr = e; }
-    }
-    throw lastErr || new Error('هیچ منبعی برای ' + name + ' تعریف نشده است');
-  })();
+  // بارگذاریِ «هج‌شده»: منبع اول فوراً شروع می‌شود؛ اگر تا LIB_HEDGE_MS جواب نداد، منبع دوم هم
+  // موازی شروع می‌شود (بدون لغو اولی) و هر کدام زودتر رسید برنده است. با این روش:
+  //  • CDN فیلتر/معلق، دقیقه‌ها کاربر را معطل نمی‌کند؛
+  //  • CDN کند ولی سالم هم قطع نمی‌شود (سقف کل LIB_TOTAL_TIMEOUT_MS).
+  const p = new Promise((resolve, reject) => {
+    const urls = spec.urls;
+    let started = 0, failed = 0, done = false, lastErr = null, hedge = null;
+    const overall = setTimeout(() => {
+      if (done) return; done = true; clearTimeout(hedge);
+      reject(lastErr || new Error('زمان بارگذاری کتابخانه تمام شد'));
+    }, LIB_TOTAL_TIMEOUT_MS);
+    const onFail = (e) => {
+      lastErr = e; failed++;
+      if (done) return;
+      if (failed >= urls.length) { done = true; clearTimeout(hedge); clearTimeout(overall); reject(lastErr); }
+      else startNext();
+    };
+    const startNext = () => {
+      if (done || started >= urls.length) return;
+      const url = urls[started++];
+      const el = document.createElement('script');
+      el.async = true;
+      el.onload = () => {
+        if (done) return;
+        if (window[spec.global]) { done = true; clearTimeout(hedge); clearTimeout(overall); resolve(window[spec.global]); }
+        else onFail(new Error('کتابخانه بار شد ولی ' + spec.global + ' تعریف نشد'));
+      };
+      el.onerror = () => { el.remove(); onFail(new Error('بارگذاری ناموفق: ' + url)); };
+      el.src = url;
+      document.head.appendChild(el);
+      clearTimeout(hedge);
+      if (started < urls.length) hedge = setTimeout(startNext, LIB_HEDGE_MS);
+    };
+    startNext();
+  });
 
   _libLoading.set(name, p);
   // اگر شکست خورد، کش را پاک کن تا تلاش بعدی دوباره سعی کند (نه اینکه برای
@@ -9434,10 +9449,10 @@ async function downloadSequentialPdf(records, org, notify) {
   if (!Array.isArray(records) || !records.length) return false;
   if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)… چند لحظه صبر کنید.', 'info');
   const light = await Promise.all(records.map(withLightPhotos));
-  const bodyHtml = light.map(r => recordReportHtml(r, org)).join('');
-  const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE);
+  // یک بخش برای هر رکورد: سندهای بلند دسته‌دسته رندر می‌شوند (سقف اندازه‌ی بوم مرورگر)
+  const b64 = await htmlToPdfBase64(light.map(r => recordReportHtml(r, org)), REPORT_STYLE);
   if (!b64) {
-    if (notify) notify('ساخت PDF ممکن نشد (کتابخانه در دسترس نیست). از دکمه‌ی «چاپ پشت‌سرهم» استفاده کنید.', 'error');
+    if (notify) notify(pdfFailureMessage(), 'error');
     return false;
   }
   downloadBase64Pdf(b64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length));
@@ -9457,11 +9472,11 @@ const NC_STYLE = `
  * برگه، فهرست آیتم‌های مغایر (نمره‌ی صفر)، یادداشت و در پایان خلاصه‌ی آماری
  * و محل امضای تأیید مدیر. ورودی فقط برگه‌های عدم انطباق است.
  */
-function nonconformityReportHtml(ncRecords, org, rangeLabel) {
+function nonconformityReportParts(ncRecords, org, rangeLabel) {
   const esc = escapeHtml;
   const total = ncRecords.length;
   const critical = ncRecords.filter(r => !!r.criticalFail || r.status === 'ناموفق (حیاتی)').length;
-  const sections = ncRecords.map(r => {
+  const sectionList = ncRecords.map(r => {
     const failed = (r.details || []).filter(d => d && d.max > 0 && Number(d.earned) === 0);
     const rows = failed.map(d => `
       <tr>
@@ -9481,8 +9496,8 @@ function nonconformityReportHtml(ncRecords, org, rangeLabel) {
           : '<div class="notes">ریز آیتم‌ها برای این برگه در دسترس نیست؛ وضعیت کلی برگه ناموفق است.</div>'}
         ${r.notes ? `<div class="notes"><b>یادداشت:</b> ${esc(r.notes)}</div>` : ''}
       </div>`;
-  }).join('');
-  return `
+  });
+  const head = `
     <div class="report">
       <div class="hdr">
         ${org.logoDataUrl ? `<img src="${esc(org.logoDataUrl)}" class="logo" />` : ''}
@@ -9496,9 +9511,16 @@ function nonconformityReportHtml(ncRecords, org, rangeLabel) {
         <div>ناموفق حیاتی: <b>${toPersianDigits(critical)}</b></div>
         <div>ناموفق عادی: <b>${toPersianDigits(total - critical)}</b></div>
       </div>
-      ${sections || '<div class="notes">موردی یافت نشد.</div>'}
-      <table class="meta" style="margin-top:18px"><tr><td>تأیید مدیر</td><td style="height:52px"></td><td>تاریخ</td><td></td></tr></table>
     </div>`;
+  const body = sectionList.length
+    ? sectionList.map(s => '<div class="report">' + s + '</div>')
+    : ['<div class="report"><div class="notes">موردی یافت نشد.</div></div>'];
+  const tail = '<div class="report"><table class="meta" style="margin-top:18px"><tr><td>تأیید مدیر</td><td style="height:52px"></td><td>تاریخ</td><td></td></tr></table></div>';
+  return [head].concat(body, [tail]);
+}
+
+function nonconformityReportHtml(ncRecords, org, rangeLabel) {
+  return nonconformityReportParts(ncRecords, org, rangeLabel).join('');
 }
 
 /** ساخت و دانلود PDF گزارش عدم انطباق‌ها */
@@ -9508,10 +9530,9 @@ async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
     return false;
   }
   if (notify) notify('در حال ساخت گزارش عدم انطباق… چند لحظه صبر کنید.', 'info');
-  const bodyHtml = nonconformityReportHtml(ncRecords, org, rangeLabel);
-  const b64 = await htmlToPdfBase64(bodyHtml, REPORT_STYLE + NC_STYLE);
+  const b64 = await htmlToPdfBase64(nonconformityReportParts(ncRecords, org, rangeLabel), REPORT_STYLE + NC_STYLE);
   if (!b64) {
-    if (notify) notify('ساخت PDF ممکن نشد (کتابخانه در دسترس نیست).', 'error');
+    if (notify) notify(pdfFailureMessage(), 'error');
     return false;
   }
   downloadBase64Pdf(b64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length));
@@ -13542,23 +13563,38 @@ function serverVersionHint(got) {
 
 const SERVER_UPDATE_HOWTO = 'راه‌حل: «تنظیمات ← کپی کد سرور (Code.gs)»، سپس در Apps Script با Deploy ← Manage deployments ← Edit ← Version: New version دوباره دیپلوی کنید (بدون ساخت نسخه‌ی جدید، آدرس /exec همان کد قبلی را اجرا می‌کند).';
 
-/** ساخت PDF سمت کلاینت (دقیق‌تر از تبدیل HTML در سرور) — رفع ایراد ۲-۵ */
+/** علت آخرین شکست ساخت PDF: 'lib' = کتابخانه لود نشد، 'build' = رندر شکست خورد */
+let lastPdfFailure = '';
+function pdfFailureMessage() {
+  return lastPdfFailure === 'lib'
+    ? 'ساخت PDF ممکن نشد: کتابخانه‌ی PDF از اینترنت بارگذاری نشد (اینترنت ضعیف یا CDN فیلتر است). دوباره امتحان کنید یا از «چاپ پشت‌سرهم» استفاده کنید.'
+    : 'ساخت PDF ناموفق بود (حافظه‌ی دستگاه کافی نبود یا تعداد برگه‌ها زیاد است). بازه‌ی کوچک‌تری انتخاب کنید یا از «چاپ پشت‌سرهم» استفاده کنید.';
+}
+
+/** ساخت PDF سمت کلاینت (دقیق‌تر از تبدیل HTML در سرور) — رفع ایراد ۲-۵
+ *  innerHtml: رشته، یا آرایه‌ای از بخش‌های مستقل (مثلاً یک برگه برای هر رکورد). اگر آرایه باشد و
+ *  کل سند بلند شود، بخش‌ها دسته‌دسته رندر و پشت هم به یک PDF اضافه می‌شوند؛ چون html2canvas کل سند را
+ *  روی «یک بوم» می‌کشد و مرورگرها سقف اندازه‌ی بوم دارند (حدود ۳۲٬۷۶۷px ارتفاع در کروم، ~۱۶ مگاپیکسل
+ *  در iOS)؛ سندهای تجمیعی با چند ده برگه‌ی ۵۷ آیتمی از این سقف رد می‌شدند و خروجی خالی می‌شد. */
 async function htmlToPdfBase64(innerHtml, styleCss) {
+  lastPdfFailure = '';
   if (typeof window === 'undefined') return null;
+  const partList = Array.isArray(innerHtml) ? innerHtml.filter(Boolean) : null;
+  const fullHtml = partList ? partList.join('') : innerHtml;
   // کتابخانه فقط هنگام ساخت PDF لود می‌شود؛ اگر در دسترس نبود، بی‌صدا null
   // برمی‌گردانیم تا مسیر PDF سمت سرور جایگزین شود.
   const html2pdfLib = await ensureLib('html2pdf').catch(e => { console.error('html2pdf در دسترس نیست؛ به مسیر سرور می‌افتیم', e); return null; });
-  if (!html2pdfLib) return null;
+  if (!html2pdfLib) { lastPdfFailure = 'lib'; return null; }
 
   // نشانه‌ی holder برای onclone: در کپیِ رندر، برگه روی صفحه برمی‌گردد
   // (رفع «PDF کاملاً سفید»: وقتی holder با left منفی بیرون از صفحه بود،
   // html2canvas به‌خصوص روی موبایل/صفحه‌ی اسکرول‌شده ناحیه‌ی خالی را عکس می‌گرفت.)
-  const buildHolder = () => {
+  const buildHolder = (htmlStr) => {
     const holder = document.createElement('div');
     holder.setAttribute('data-pdf-holder', '1');
     holder.setAttribute('dir', 'rtl');
     holder.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1;';
-    holder.innerHTML = '<style>' + (styleCss || '') + '</style>' + innerHtml;
+    holder.innerHTML = '<style>' + (styleCss || '') + '</style>' + htmlStr;
     document.body.appendChild(holder);
     return holder;
   };
@@ -13580,70 +13616,50 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     } catch (e) { /* بی‌خطر: حتی اگر نشد، تنظیمات scroll کمک می‌کند */ }
   };
 
-  const tryBuild = async (opt) => {
-    const holder = buildHolder();
+  // آماده‌سازی کامل رندر پیش از عکس‌گرفتن: فونت‌های وب باید لود شده باشند
+  // و تصاویر (امضاها/عکس‌ها) decode شده باشند — وگرنه html2canvas ناحیه‌ی
+  // خالی می‌گیرد (دلیل دیگری برای «PDF سفید/ناقص»).
+  const prepareHolder = async (holder) => {
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
     try {
-      // آماده‌سازی کامل رندر پیش از عکس‌گرفتن: فونت‌های وب باید لود شده باشند
-      // و تصاویر (امضاها/عکس‌ها) decode شده باشند — وگرنه html2canvas ناحیه‌ی
-      // خالی می‌گیرد (دلیل دیگری برای «PDF سفید/ناقص»).
-      try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
-      try {
-        const imgs = holder.querySelectorAll('img');
-        await Promise.all([...imgs].map(im => (im.decode ? im.decode().catch(() => {}) : Promise.resolve())));
-      } catch (e) {}
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-      const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
-      const b64 = await new Promise((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
-        fr.onerror = () => reject(fr.error);
-        fr.readAsDataURL(blob);
-      });
-      // اعتبارسنجی: خروجی باید واقعاً PDF (%PDF-) و به‌اندازه‌ی کافی بزرگ باشد؛
-      // وگرنه به‌عنوان شکست اعلام می‌شود (نه اینکه فایل سفید دانلود شود).
-      let head = '';
-      try { head = atob(b64.slice(0, 24)).slice(0, 5); } catch (e) { head = ''; }
-      // هر PDF واقعیِ ساخته‌شده از رندر صفحه، یک JPEG تمام‌صفحه درونش دارد
-      // (حداقل ~۱۵KB باینری). خروجی‌های «صفحه‌ی خالی» ~۳KB هستند → رد.
-      return (b64.length > 12000 && head === '%PDF-') ? b64 : null;
-    } catch (e) {
-      console.error('ساخت PDF ناموفق بود', e);
-      return null;
-    } finally {
-      holder.remove();
-    }
+      const imgs = holder.querySelectorAll('img');
+      await Promise.all([...imgs].map(im => (im.decode ? im.decode().catch(() => {}) : Promise.resolve())));
+    } catch (e) {}
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   };
 
-  // تلاش اول: کیفیت کامل. تلاش دوم (fallback): تنظیمات سبک‌تر برای دستگاه‌های
-  // ضعیف/موبایل که با scale بزرگ خروجی خالی می‌دهند.
-  // مقیاس تطبیقی: روی آیفون/iOS سقف اندازه‌ی canvas حدود ۱۶ مگاپیکسل است؛
-  // برگه‌ی بلند (چند برگه پشت‌سرهم/عکس‌دار) با scale=2 از این سقف رد می‌شود و
-  // html2canvas به‌جای خطا، بخشی خالی تحویل می‌دهد. مقیاس را طوری انتخاب
-  // می‌کنیم که کل بوم زیر بودجه‌ی امن بماند (کامل بودن مقدم بر وضوح است).
-  const measureH = () => {
-    const h0 = buildHolder();
+  // اعتبارسنجی: خروجی باید واقعاً PDF (%PDF-) و به‌اندازه‌ی کافی بزرگ باشد؛
+  // وگرنه به‌عنوان شکست اعلام می‌شود (نه اینکه فایل سفید دانلود شود).
+  const blobToValidB64 = async (blob) => {
+    const b64 = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
+    let head = '';
+    try { head = atob(b64.slice(0, 24)).slice(0, 5); } catch (e) { head = ''; }
+    // هر PDF واقعیِ ساخته‌شده از رندر صفحه، یک JPEG تمام‌صفحه درونش دارد
+    // (حداقل ~۱۵KB باینری). خروجی‌های «صفحه‌ی خالی» ~۳KB هستند → رد.
+    return (b64.length > 12000 && head === '%PDF-') ? b64 : null;
+  };
+
+  const measureH = (htmlStr) => {
+    const h0 = buildHolder(htmlStr);
     const hh = Math.max(1, h0.scrollHeight || 0);
     h0.remove();
     return hh;
   };
-  const CONTENT_H = measureH();
+  const CONTENT_H = measureH(fullHtml);
+
+  // مقیاس تطبیقی: روی آیفون/iOS سقف اندازه‌ی canvas حدود ۱۶ مگاپیکسل است؛
+  // کامل بودن مقدم بر وضوح است. سقف ۱٫۵ (به‌جای ۲): ~۲۵٪ سریع‌تر و ~۵۵٪ سبک‌تر.
   const PIXEL_BUDGET = 13000000; // زیر سقف iOS با حاشیه‌ی امن
   const PDF_MAX_SCALE = 1.5;
-  const fitScale = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(CONTENT_H, 600)))));
-  // سقف مقیاس ۲ → ۱٫۵: در اندازه‌گیری، زمان رندر ~۲۵٪ و حجم PDF ~۵۵٪ کمتر می‌شود
-  // (آپلود/دانلود سریع‌تر) و متن چک‌لیست همچنان ~۱۴۴dpi و خوانا می‌ماند.
-  const s1 = Math.min(PDF_MAX_SCALE, Math.round(fitScale * 100) / 100);
-  const s2 = Math.max(0.6, Math.round(fitScale * 0.7 * 100) / 100);
-
-  /** تعداد صفحه‌های PDF (برای کشف «برگه‌ی بلند ولی فقط ۱ صفحه» = خروجی ناقص) */
-  const pdfPageCount = (b64) => {
-    try {
-      const bin = atob(b64);
-      const m = bin.match(/\/Type\s*\/Page[^s]/g);
-      return m ? m.length : 0;
-    } catch (e) { return 0; }
+  const scaleFor = (H) => {
+    const fit = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(H, 600)))));
+    return Math.min(PDF_MAX_SCALE, Math.round(fit * 100) / 100);
   };
-
   const optFor = (sc) => ({
     // حاشیه‌ها دقیقاً مثل @page { margin: 14mm } در REPORT_STYLE — یعنی همان
     // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
@@ -13653,6 +13669,77 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'] },
   });
+
+  /* ---------- مسیر دسته‌ای: سند بلند با چند بخش مستقل ---------- */
+  const SINGLE_MAX_H = 9000;  // تا این ارتفاع (≈ ۸ صفحه) همان رندر یک‌تکه
+  // ارتفاع هر دسته (≈ ۱۰ صفحه) → مقیاس ~۱٫۱۷ و بوم ≤ ~۱۴٬۰۰۰px (زیر سقف ۳۲٬۷۶۷). در اندازه‌گیری،
+  // دسته‌ی کوچک‌تر (۶۰۰۰) به‌خاطر هزینه‌ی ثابت هر دسته ~۲٫۵ برابر کندتر بود (۲۶٫۸ در برابر ~۱۱ ثانیه برای ۳۰ برگه).
+  const CHUNK_H = 12000;
+  const buildChunked = async (factor) => {
+    const probe = buildHolder(partList.map(p => '<div data-part="1">' + p + '</div>').join(''));
+    let heights;
+    try { heights = [...probe.querySelectorAll(':scope > [data-part]')].map(el => Math.max(1, el.offsetHeight)); }
+    finally { probe.remove(); }
+    const chunks = [];
+    let cur = [], curH = 0;
+    partList.forEach((p, i) => {
+      const ph = heights[i] || 1000;
+      if (cur.length && curH + ph > CHUNK_H) { chunks.push({ html: cur.join(''), h: curH }); cur = []; curH = 0; }
+      cur.push(p); curH += ph;
+    });
+    if (cur.length) chunks.push({ html: cur.join(''), h: curH });
+    let worker = null;
+    try {
+      for (const ch of chunks) {
+        const holder = buildHolder(ch.html);
+        try {
+          await prepareHolder(holder);
+          const opt = optFor(Math.max(0.6, Math.round(scaleFor(ch.h) * factor * 100) / 100));
+          // زنجیره‌ی مستند html2pdf: همان jsPDF بین دسته‌ها حفظ می‌شود و هر دسته از صفحه‌ی تازه شروع می‌شود
+          worker = worker
+            ? worker.get('pdf').then(pdf => { pdf.addPage(); }).set(opt).from(holder).toContainer().toCanvas().toPdf()
+            : html2pdfLib().set(opt).from(holder).toPdf();
+          await worker;
+        } finally { holder.remove(); }
+      }
+      return await blobToValidB64(await worker.outputPdf('blob'));
+    } catch (e) {
+      console.error('ساخت PDF دسته‌ای ناموفق بود', e);
+      return null;
+    }
+  };
+  if (partList && partList.length > 1 && CONTENT_H > SINGLE_MAX_H) {
+    const out = (await buildChunked(1)) || (await buildChunked(0.7));
+    if (!out) lastPdfFailure = 'build';
+    return out;
+  }
+
+  /* ---------- مسیر یک‌تکه ---------- */
+  const tryBuild = async (opt) => {
+    const holder = buildHolder(fullHtml);
+    try {
+      await prepareHolder(holder);
+      const blob = await html2pdfLib().set(opt).from(holder).outputPdf('blob');
+      return await blobToValidB64(blob);
+    } catch (e) {
+      console.error('ساخت PDF ناموفق بود', e);
+      return null;
+    } finally {
+      holder.remove();
+    }
+  };
+
+  const s1 = scaleFor(CONTENT_H);
+  const s2 = Math.max(0.6, Math.round(s1 * 0.7 * 100) / 100);
+
+  /** تعداد صفحه‌های PDF (برای کشف «برگه‌ی بلند ولی فقط ۱ صفحه» = خروجی ناقص) */
+  const pdfPageCount = (b64) => {
+    try {
+      const bin = atob(b64);
+      const m = bin.match(/\/Type\s*\/Page[^s]/g);
+      return m ? m.length : 0;
+    } catch (e) { return 0; }
+  };
 
   const b64 = await tryBuild(optFor(s1));
   if (b64) {
@@ -13670,7 +13757,9 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     }
     return b64;
   }
-  return await tryBuild(optFor(s2));
+  const retry = await tryBuild(optFor(s2));
+  if (!retry) lastPdfFailure = 'build';
+  return retry;
 }
 
 /* عکس‌های بازرسی در گزارش فقط ۱۲۰×۹۰ پیکسل نمایش داده می‌شوند، ولی نسخه‌ی ذخیره‌شده تا ۱۲۸۰px
