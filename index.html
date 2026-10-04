@@ -9460,67 +9460,236 @@ async function downloadSequentialPdf(records, org, notify) {
   return true;
 }
 
-/* استایل مخصوص بخش‌های گزارش عدم انطباق (علاوه بر REPORT_STYLE) */
-const NC_STYLE = `
-  .nc-sec { border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px; margin-bottom:14px; page-break-inside:avoid; }
-  .nc-sec h3 { font-size:13px; margin:0 0 8px; }
-  .nc-bad { color:#b91c1c; font-weight:bold; }
+/* ============================================================
+   گزارش عدم انطباق‌ها — صفحه‌بندی دقیق (بدون برش وسط ردیف/بخش)
+   ------------------------------------------------------------
+   ریشه‌ی بی‌نظمی خروجی قبلی: html2pdf محل «شکست صفحه» را با ارتفاع ~۱۰۱۶px حساب می‌کند ولی بوم را
+   هر ~۱۱۷۳px برش می‌دهد (چون عرض سند ۷۹۴px است نه ۶۸۸px). نتیجه: فاصله‌ی خالی بزرگ + بریده‌شدن
+   جدول‌ها و کادرها وسط صفحه. این‌جا صفحه‌ها را خودمان در مرورگر می‌چینیم (اندازه‌گیریِ واقعی هر
+   ردیف)؛ هر صفحه یک برگه‌ی A4 با ارتفاع ثابت است و PDF فقط از هر صفحه یک عکس می‌گیرد. */
+const NC_PAGE_H = 1170;      // ارتفاع محتوای هر صفحه (px، در عرض ۷۹۴) — کمی کمتر از ۱۱۷۳ تا هیچ‌گاه به صفحه‌ی دوم نریزد
+const NC_BODY_H = 1122;      // بدنه (بدون پانویس)
+const NC_FIT_LIMIT = 1112;   // حد مجاز محتوا؛ ۱۰px حاشیه‌ی امن برای اختلاف گردکردن
+const NC_PAGE_STYLE = `
+  .nc-page { width:794px; height:${NC_PAGE_H}px; box-sizing:border-box; background:#fff; color:#0f172a; direction:rtl;
+             font-family:Tahoma,sans-serif; display:flex; flex-direction:column; overflow:hidden; }
+  .nc-page * { box-sizing:border-box; }
+  .nc-body { height:${NC_BODY_H}px; overflow:hidden; flex:none; }
+  .nc-flow { display:flow-root; }
+  .nc-flow > div:first-child > .nc-rec, .nc-flow > div:first-child > .nc-h2 { margin-top:0 !important; }
+  .nc-foot { flex:none; height:${NC_PAGE_H - NC_BODY_H}px; border-top:1px solid #cbd5e1; display:flex; align-items:center;
+             justify-content:space-between; font-size:10px; color:#64748b; }
+  .nc-hdr { display:flex; align-items:center; gap:12px; border-bottom:2px solid #0f172a; padding-bottom:10px; margin-bottom:12px; }
+  .nc-hdr img { height:48px; }
+  .nc-hdr-text { flex:1; }
+  .nc-org { font-size:18px; font-weight:bold; }
+  .nc-sub { font-size:12px; color:#475569; margin-top:3px; }
+  .nc-hdr-meta { font-size:11px; color:#475569; text-align:left; line-height:1.9; }
+  .nc-kpis { display:flex; gap:8px; margin-bottom:6px; }
+  .nc-kpi { flex:1; border:1px solid #cbd5e1; border-radius:8px; padding:8px 6px; text-align:center; background:#f8fafc; }
+  .nc-kpi b { display:block; font-size:20px; line-height:1.4; }
+  .nc-kpi span { font-size:10.5px; color:#475569; }
+  .nc-kpi.bad b { color:#b91c1c; }
+  .nc-h2 { font-size:14px; font-weight:bold; margin:16px 0 7px; padding-right:8px; border-right:4px solid #0f172a; line-height:1.5; }
+  .nc-h2 small { font-size:11px; font-weight:normal; color:#64748b; }
+  table.nc-t { width:100%; border-collapse:collapse; table-layout:fixed; font-size:11.5px; }
+  table.nc-t th, table.nc-t td { border:1px solid #cbd5e1; padding:5px 6px; text-align:right; vertical-align:top; line-height:1.7;
+                                 word-break:break-word; overflow-wrap:anywhere; }
+  table.nc-t th { background:#e2e8f0; font-weight:bold; vertical-align:middle; white-space:nowrap; }
+  table.nc-t .c { text-align:center; }
+  table.nc-t tbody tr:nth-child(even) td { background:#f8fafc; }
+  table.nc-meta td { border:1px solid #e2e8f0; padding:4px 8px; font-size:11px; line-height:1.7; }
+  table.nc-meta td:nth-child(odd) { background:#f1f5f9; font-weight:bold; width:14%; }
+  table.nc-meta { width:100%; border-collapse:collapse; table-layout:fixed; margin:6px 0 8px; }
+  .nc-rec { border-top:3px solid #0f172a; margin-top:16px; padding-top:7px; }
+  .nc-rec-title { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:13px; font-weight:bold; line-height:1.6; }
+  .nc-cont { font-size:12px; font-weight:bold; color:#475569; border-bottom:1px dashed #94a3b8; padding-bottom:4px; margin:2px 0 7px; }
+  .nc-badge { display:inline-block; padding:1px 9px; border-radius:10px; font-size:11px; background:#fef3c7; color:#92400e; white-space:nowrap; }
+  .nc-badge.crit { background:#fee2e2; color:#b91c1c; }
+  .nc-note { font-size:10.5px; color:#b45309; margin-top:3px; line-height:1.7; }
+  .nc-crit { color:#b91c1c; font-weight:bold; }
+  .nc-box { font-size:11.5px; line-height:1.8; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:7px 10px; margin-top:8px; }
+  .nc-empty { font-size:11.5px; color:#475569; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:6px; padding:8px 10px; margin-top:6px; }
+  .nc-sign { display:flex; gap:10px; margin-top:22px; }
+  .nc-sign div { flex:1; border:1px solid #cbd5e1; border-radius:8px; height:74px; padding:6px 10px; font-size:11px; color:#475569; }
 `;
 
-/**
- * گزارش عدم انطباق‌ها: برای هر برگه‌ی ناموفق/حیاتی یک بخش مستقل با مشخصات
- * برگه، فهرست آیتم‌های مغایر (نمره‌ی صفر)، یادداشت و در پایان خلاصه‌ی آماری
- * و محل امضای تأیید مدیر. ورودی فقط برگه‌های عدم انطباق است.
- */
-function nonconformityReportParts(ncRecords, org, rangeLabel) {
-  const esc = escapeHtml;
-  const total = ncRecords.length;
-  const critical = ncRecords.filter(r => !!r.criticalFail || r.status === 'ناموفق (حیاتی)').length;
-  const sectionList = ncRecords.map(r => {
-    const failed = (r.details || []).filter(d => d && d.max > 0 && Number(d.earned) === 0);
-    const rows = failed.map(d => `
-      <tr>
-        <td>${esc(d.label)}${d.note ? '<div style="font-size:11px;color:#b45309;margin-top:3px">توضیح: ' + esc(d.note) + '</div>' : ''}</td>
-        <td>${d.value === false ? 'تأیید نشد' : esc(String(d.value === undefined || d.value === null || d.value === '' ? '—' : d.value))}</td>
-        <td>${d.critical ? '<b class="nc-bad">بله</b>' : 'خیر'}</td>
-      </tr>`).join('');
-    return `
-      <div class="nc-sec">
-        <h3>${esc(r.assetCode)} — ${esc(r.assetTitle || r.assetName || '')}</h3>
-        <table class="meta">
-          <tr><td>قالب</td><td>${esc(r.templateName)}</td><td>بازرس</td><td>${esc(r.inspectorName)}</td></tr>
-          <tr><td>تاریخ</td><td>${esc(toPersianDigits(r.date || gregorianToJalaliStr(r.completedAt)))}</td><td>نتیجه</td><td><b class="nc-bad">${esc(r.status)} (${toPersianDigits(r.percent)}٪)</b></td></tr>
-        </table>
-        ${rows
-          ? `<table class="results"><thead><tr><th>آیتم مغایر</th><th>پاسخ</th><th>حیاتی</th></tr></thead><tbody>${rows}</tbody></table>`
-          : '<div class="notes">ریز آیتم‌ها برای این برگه در دسترس نیست؛ وضعیت کلی برگه ناموفق است.</div>'}
-        ${r.notes ? `<div class="notes"><b>یادداشت:</b> ${esc(r.notes)}</div>` : ''}
-      </div>`;
-  });
-  const head = `
-    <div class="report">
-      <div class="hdr">
-        ${org.logoDataUrl ? `<img src="${esc(org.logoDataUrl)}" class="logo" />` : ''}
-        <div class="hdr-text"><div class="org-name">${esc(org.orgName || '')}</div><div class="sub">گزارش عدم انطباق‌های بازرسی</div></div>
-      </div>
-      <table class="meta">
-        <tr><td>بازه / فیلتر</td><td>${esc(rangeLabel || 'همه')}</td><td>تاریخ تهیه</td><td>${esc(toPersianDigits(gregorianToJalaliStr(new Date())))}</td></tr>
-      </table>
-      <div class="summary">
-        <div>تعداد عدم انطباق: <b>${toPersianDigits(total)}</b></div>
-        <div>ناموفق حیاتی: <b>${toPersianDigits(critical)}</b></div>
-        <div>ناموفق عادی: <b>${toPersianDigits(total - critical)}</b></div>
-      </div>
-    </div>`;
-  const body = sectionList.length
-    ? sectionList.map(s => '<div class="report">' + s + '</div>')
-    : ['<div class="report"><div class="notes">موردی یافت نشد.</div></div>'];
-  const tail = '<div class="report"><table class="meta" style="margin-top:18px"><tr><td>تأیید مدیر</td><td style="height:52px"></td><td>تاریخ</td><td></td></tr></table></div>';
-  return [head].concat(body, [tail]);
+/** آیتم‌های مغایر یک برگه: ابتدا آیتم‌های «نمره‌ی صفر» (حیاتی‌ها اول)؛ اگر نبود، آیتم‌های «کسر امتیاز».
+ *  آیتم‌های اطلاعاتی (earned=null) و «کاربرد ندارد» هرگز مغایر حساب نمی‌شوند. */
+function ncItemsOf(r) {
+  const scored = (r.details || []).filter(d => d && !d.na && Number(d.max) > 0 && d.earned !== null && d.earned !== undefined);
+  let items = scored.filter(d => Number(d.earned) === 0);
+  let partial = false;
+  if (!items.length) { items = scored.filter(d => Number(d.earned) < Number(d.max)); partial = true; }
+  items = items.map((d, i) => ({ d, i })).sort((a, b) => ((b.d.critical ? 1 : 0) - (a.d.critical ? 1 : 0)) || (a.i - b.i)).map(x => x.d);
+  return { items, partial };
 }
 
-function nonconformityReportHtml(ncRecords, org, rangeLabel) {
-  return nonconformityReportParts(ncRecords, org, rangeLabel).join('');
+/** صفحه‌های گزارش عدم انطباق → آرایه‌ای از رشته‌های HTML (هر کدام یک برگه‌ی A4 با ارتفاع ثابت). */
+async function buildNcPages(ncRecords, org, rangeLabel) {
+  const esc = escapeHtml, fa = (v) => toPersianDigits(String(v === undefined || v === null ? '' : v));
+  try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+
+  // ---- داده‌ها
+  const recs = ncRecords.map(r => Object.assign({ r }, ncItemsOf(r)));
+  const total = recs.length;
+  const critRecs = recs.filter(x => !!x.r.criticalFail || x.r.status === 'ناموفق (حیاتی)').length;
+  const totalItems = recs.reduce((s, x) => s + x.items.length, 0);
+  const critItems = recs.reduce((s, x) => s + x.items.filter(d => d.critical).length, 0);
+  const dateOf = (r) => r.dateJalali || String(r.date || '').split(' - ')[0] || gregorianToJalaliStr(r.completedAt) || '—';
+  const isCrit = (r) => !!r.criticalFail || r.status === 'ناموفق (حیاتی)';
+  const badge = (r) => `<span class="nc-badge${isCrit(r) ? ' crit' : ''}">${esc(r.status)} — ${fa(r.percent)}٪</span>`;
+  const titleOf = (r) => esc(r.assetCode) + (r.assetTitle || r.assetName ? ' — ' + esc(r.assetTitle || r.assetName) : '');
+
+  // پرتکرارترین موارد مغایر (فقط وقتی تکرار واقعی وجود دارد)
+  const freq = new Map();
+  recs.forEach(x => { const seen = new Set(); x.items.forEach(d => { const k = String(d.label || '').trim(); if (k && !seen.has(k)) { seen.add(k); freq.set(k, (freq.get(k) || 0) + 1); } }); });
+  const top = [...freq.entries()].filter(e => e[1] >= 2).sort((a, b) => b[1] - a[1]).slice(0, 8);
+
+  // ---- جعبه‌ی اندازه‌گیری (خارج از صفحه، با همان عرض و استایل)
+  const box = document.createElement('div');
+  box.setAttribute('dir', 'rtl');
+  box.style.cssText = 'position:absolute;left:-12000px;top:0;width:794px;visibility:hidden;pointer-events:none;';
+  box.innerHTML = '<style>' + NC_PAGE_STYLE + '</style>';
+  document.body.appendChild(box);
+  const pages = [];
+  let cur = null;
+  const newPage = () => {
+    const el = document.createElement('div');
+    el.className = 'nc-page';
+    el.innerHTML = '<div class="nc-body"><div class="nc-flow"></div></div><div class="nc-foot"></div>';
+    box.appendChild(el);
+    cur = { el, flow: el.querySelector('.nc-flow') };
+    pages.push(cur);
+  };
+  const fits = () => cur.flow.getBoundingClientRect().height <= NC_FIT_LIMIT;
+  const isEmptyPage = () => cur.flow.children.length === 0;
+  const html2node = (html) => { const w = document.createElement('div'); w.innerHTML = html; return w; };
+
+  /** بلوک تقسیم‌ناپذیر: اگر در صفحه‌ی جاری جا نشد، به صفحه‌ی بعد می‌رود. */
+  const placeBlock = (html) => {
+    const n = html2node(html);
+    cur.flow.appendChild(n);
+    if (!fits() && cur.flow.children.length > 1) { cur.flow.removeChild(n); newPage(); cur.flow.appendChild(n); }
+  };
+
+  /** جدول تقسیم‌پذیر: سرستون در هر صفحه تکرار می‌شود، هیچ ردیفی نصف نمی‌شود و عنوان تنها در ته صفحه نمی‌ماند
+   *  (حداقل minRows ردیف همراه عنوان بیاید). */
+  const flowTable = (o) => {
+    let i = 0, first = true, guard = 0;
+    while (guard++ < 5000) {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = (first ? o.head : o.cont) + '<table class="nc-t">' + o.colgroup + o.thead + '<tbody></tbody></table>';
+      const tbody = wrap.querySelector('table.nc-t > tbody');
+      cur.flow.appendChild(wrap);
+      const start = i;
+      while (i < o.rows.length) {
+        tbody.insertAdjacentHTML('beforeend', o.rows[i]);
+        if (!fits()) { tbody.lastElementChild.remove(); break; }
+        i++;
+      }
+      const placed = i - start, remaining = o.rows.length - start;
+      const need = Math.min(o.minRows || 2, remaining);
+      if (placed < need && !isEmptyPage() && cur.flow.children.length > 1) {
+        // جای کافی نبود → کل تکه (عنوان + سرستون) به صفحه‌ی بعد
+        i = start; cur.flow.removeChild(wrap); newPage(); continue;
+      }
+      if (placed === 0 && o.rows.length > 0) {
+        // ردیفی که حتی در صفحه‌ی خالی جا نمی‌شود (بسیار بلند) — اجباراً بگذار تا حلقه گیر نکند
+        tbody.insertAdjacentHTML('beforeend', o.rows[i]); i++;
+      }
+      if (i >= o.rows.length) break;
+      newPage(); first = false;
+    }
+  };
+
+  try {
+    newPage();
+
+    // ---- صفحه‌ی اول: سربرگ + خلاصه‌ی آماری
+    placeBlock(`
+      <div class="nc-hdr">
+        ${org && org.logoDataUrl ? `<img src="${esc(org.logoDataUrl)}" />` : ''}
+        <div class="nc-hdr-text">
+          <div class="nc-org">${esc((org && org.orgName) || '')}</div>
+          <div class="nc-sub">گزارش عدم انطباق‌های بازرسی</div>
+        </div>
+        <div class="nc-hdr-meta">
+          <div>بازه / فیلتر: <b>${esc(fa(rangeLabel || 'همه'))}</b></div>
+          <div>تاریخ تهیه: <b>${esc(fa(gregorianToJalaliStr(new Date())))}</b></div>
+        </div>
+      </div>
+      <div class="nc-kpis">
+        <div class="nc-kpi"><b>${fa(total)}</b><span>برگه‌ی دارای عدم انطباق</span></div>
+        <div class="nc-kpi bad"><b>${fa(critRecs)}</b><span>ناموفق حیاتی</span></div>
+        <div class="nc-kpi"><b>${fa(total - critRecs)}</b><span>ناموفق عادی</span></div>
+        <div class="nc-kpi"><b>${fa(totalItems)}</b><span>مجموع آیتم‌های مغایر</span></div>
+        <div class="nc-kpi bad"><b>${fa(critItems)}</b><span>آیتم مغایرِ حیاتی</span></div>
+      </div>`);
+
+    // ---- فهرست خلاصه‌ی برگه‌ها
+    flowTable({
+      head: '<div class="nc-h2">فهرست برگه‌های عدم انطباق</div>',
+      cont: '<div class="nc-h2">فهرست برگه‌های عدم انطباق <small>(ادامه)</small></div>',
+      colgroup: '<colgroup><col style="width:44px"><col style="width:88px"><col><col style="width:84px"><col style="width:92px"><col style="width:50px"><col style="width:66px"><col style="width:62px"></colgroup>',
+      thead: '<thead><tr><th class="c">ردیف</th><th>کد تجهیز</th><th>قالب چک‌لیست</th><th class="c">تاریخ</th><th>بازرس</th><th class="c">درصد</th><th class="c">وضعیت</th><th class="c">مغایرت</th></tr></thead>',
+      rows: recs.map((x, i) => `<tr><td class="c">${fa(i + 1)}</td><td>${esc(x.r.assetCode)}</td><td>${esc(x.r.templateName)}</td><td class="c">${esc(fa(dateOf(x.r)))}</td><td>${esc(x.r.inspectorName)}</td><td class="c">${fa(x.r.percent)}٪</td><td class="c${isCrit(x.r) ? ' nc-crit' : ''}">${esc(isCrit(x.r) ? 'حیاتی' : 'ناموفق')}</td><td class="c">${fa(x.items.length)}</td></tr>`),
+      minRows: 3,
+    });
+
+    // ---- پرتکرارترین موارد
+    if (top.length) {
+      flowTable({
+        head: '<div class="nc-h2">پرتکرارترین عدم انطباق‌ها <small>(تعداد برگه‌هایی که این مورد در آن‌ها مغایر بوده)</small></div>',
+        cont: '<div class="nc-h2">پرتکرارترین عدم انطباق‌ها <small>(ادامه)</small></div>',
+        colgroup: '<colgroup><col style="width:44px"><col><col style="width:90px"></colgroup>',
+        thead: '<thead><tr><th class="c">ردیف</th><th>آیتم</th><th class="c">تعداد برگه</th></tr></thead>',
+        rows: top.map((e, i) => `<tr><td class="c">${fa(i + 1)}</td><td>${esc(e[0])}</td><td class="c">${fa(e[1])}</td></tr>`),
+        minRows: 3,
+      });
+    }
+
+    // ---- جزئیات هر برگه
+    recs.forEach((x, idx) => {
+      const r = x.r;
+      const metaHtml = `
+        <table class="nc-meta">
+          <tr><td>قالب</td><td>${esc(r.templateName)}</td><td>بازرس</td><td>${esc(r.inspectorName)}</td></tr>
+          <tr><td>تاریخ</td><td>${esc(fa(dateOf(r)))}</td><td>${r.location ? 'محل' : 'مهلت'}</td><td>${esc(fa(r.location || r.dueDate || '—'))}</td></tr>
+        </table>`;
+      const head = (idx === 0 ? '<div class="nc-h2" style="margin-top:20px">جزئیات عدم انطباق‌ها</div>' : '') +
+        `<div class="nc-rec"><div class="nc-rec-title"><span>${fa(idx + 1)}. ${titleOf(r)}</span>${badge(r)}</div>${metaHtml}
+         <div style="font-size:11.5px;font-weight:bold;margin:4px 0 5px">${x.partial ? 'آیتم‌های دارای کسر امتیاز' : 'آیتم‌های مغایر'} (${fa(x.items.length)})</div></div>`;
+      const cont = `<div class="nc-cont">${fa(idx + 1)}. ${titleOf(r)} <span style="font-weight:normal">(ادامه)</span></div>`;
+      const valTxt = (d) => d.value === false ? 'تأیید نشد'
+        : (d.value === undefined || d.value === null || d.value === '' ? 'بدون پاسخ' : esc(fa(typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : d.value)));
+      if (x.items.length) {
+        flowTable({
+          head, cont,
+          colgroup: '<colgroup><col style="width:44px"><col><col style="width:116px"><col style="width:66px"><col style="width:52px"></colgroup>',
+          thead: '<thead><tr><th class="c">ردیف</th><th>آیتم</th><th>پاسخ ثبت‌شده</th><th class="c">امتیاز</th><th class="c">حیاتی</th></tr></thead>',
+          rows: x.items.map((d, i) => `<tr><td class="c">${fa(i + 1)}</td><td>${esc(d.label)}${d.note ? '<div class="nc-note">توضیح بازرس: ' + esc(d.note) + '</div>' : ''}</td><td>${valTxt(d)}</td><td class="c">${fa(Math.round(Number(d.earned) * 10) / 10)} از ${fa(d.max)}</td><td class="c${d.critical ? ' nc-crit' : ''}">${d.critical ? 'بله' : 'خیر'}</td></tr>`),
+          minRows: 2,
+        });
+      } else {
+        placeBlock(head + '<div class="nc-empty">ریز آیتم‌های این برگه ثبت نشده یا در دسترس نیست؛ وضعیت کلی برگه «' + esc(r.status) + '» است.</div>');
+      }
+      if (r.notes) placeBlock(`<div class="nc-box"><b>یادداشت بازرس:</b> ${esc(r.notes)}</div>`);
+    });
+
+    // ---- تأیید مدیر (پایان گزارش)
+    placeBlock(`<div class="nc-h2" style="margin-top:24px">تأیید و بررسی مدیر</div>
+      <div class="nc-sign"><div>نام و نام خانوادگی:</div><div>امضا:</div><div>تاریخ:</div></div>`);
+
+    // ---- پانویس: شماره‌ی صفحه
+    const n = pages.length, orgName = esc((org && org.orgName) || '');
+    pages.forEach((p, i) => {
+      p.el.querySelector('.nc-foot').innerHTML = `<span>${orgName} — گزارش عدم انطباق‌ها</span><span>صفحه ${fa(i + 1)} از ${fa(n)}</span>`;
+    });
+    return pages.map(p => p.el.outerHTML);
+  } finally {
+    try { box.remove(); } catch (e) {}
+  }
 }
 
 /** ساخت و دانلود PDF گزارش عدم انطباق‌ها */
@@ -9530,13 +9699,21 @@ async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
     return false;
   }
   if (notify) notify('در حال ساخت گزارش عدم انطباق… چند لحظه صبر کنید.', 'info');
-  const b64 = await htmlToPdfBase64(nonconformityReportParts(ncRecords, org, rangeLabel), REPORT_STYLE + NC_STYLE);
+  let pages;
+  try { pages = await buildNcPages(ncRecords, org || {}, rangeLabel); }
+  catch (e) {
+    console.error('صفحه‌بندی گزارش عدم انطباق ناموفق بود', e);
+    lastPdfFailure = 'build'; lastPdfError = (e && e.message) ? e.message : String(e);
+    if (notify) notify(pdfFailureMessage(), 'error');
+    return false;
+  }
+  const b64 = await htmlToPdfBase64(pages, NC_PAGE_STYLE, { pageCssH: NC_PAGE_H });
   if (!b64) {
     if (notify) notify(pdfFailureMessage(), 'error');
     return false;
   }
   downloadBase64Pdf(b64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length));
-  if (notify) notify('گزارش عدم انطباق‌ها (' + toPersianDigits(ncRecords.length) + ' مورد) دانلود شد.', 'success');
+  if (notify) notify('گزارش عدم انطباق‌ها (' + toPersianDigits(ncRecords.length) + ' مورد، ' + toPersianDigits(pages.length) + ' صفحه) دانلود شد.', 'success');
   return true;
 }
 
@@ -13578,7 +13755,7 @@ function pdfFailureMessage() {
  *  کل سند بلند شود، بخش‌ها دسته‌دسته رندر و پشت هم به یک PDF اضافه می‌شوند؛ چون html2canvas کل سند را
  *  روی «یک بوم» می‌کشد و مرورگرها سقف اندازه‌ی بوم دارند (حدود ۳۲٬۷۶۷px ارتفاع در کروم، ~۱۶ مگاپیکسل
  *  در iOS)؛ سندهای تجمیعی با چند ده برگه‌ی ۵۷ آیتمی از این سقف رد می‌شدند و خروجی خالی می‌شد. */
-async function htmlToPdfBase64(innerHtml, styleCss) {
+async function htmlToPdfBase64(innerHtml, styleCss, opts) {
   lastPdfFailure = '';
   lastPdfError = '';
   // دستگاه کم‌حافظه (موبایل/iOS): بوم‌های کوچک‌تر و دسته‌های کوتاه‌تر، چون سقف حافظه‌ی بوم
@@ -13675,7 +13852,6 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     removeHolder(h0);
     return hh;
   };
-  const CONTENT_H = measureH(fullHtml);
 
   // مقیاس تطبیقی: روی آیفون/iOS سقف اندازه‌ی canvas حدود ۱۶ مگاپیکسل است؛
   // کامل بودن مقدم بر وضوح است. سقف ۱٫۵ (به‌جای ۲): ~۲۵٪ سریع‌تر و ~۵۵٪ سبک‌تر.
@@ -13694,6 +13870,58 @@ async function htmlToPdfBase64(innerHtml, styleCss) {
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'] },
   });
+
+  /* ---------- مسیر «صفحه‌ی ثابت»: هر بخش خودش یک برگه‌ی A4 کامل است (گزارش عدم انطباق) ----------
+     محل شکست صفحه را خودِ برنامه تعیین کرده؛ اینجا فقط از هر صفحه یک عکس گرفته می‌شود. هر صفحه جداگانه
+     رندر می‌شود: بوم کوچک (~۲ مگاپیکسل) ⇒ حافظه‌ی کم، و هیچ برشی وسط ردیف/بخش نیست. اگر رندر یک صفحه
+     شکست خورد، همان صفحه با مقیاس کمتر دوباره تلاش می‌شود. */
+  if (opts && opts.pageCssH && partList && partList.length) {
+    const pageH = opts.pageCssH;
+    const buildFixed = async () => {
+      let pdf = null;
+      for (let i = 0; i < partList.length; i++) {
+        let ok = false, sf = 1;
+        for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+          const holder = buildHolder(partList[i]);
+          let canvas = null;
+          try {
+            await prepareHolder(holder);
+            const opt = optFor(Math.max(0.5, Math.round(scaleFor(pageH) * sf * 100) / 100));
+            opt.pagebreak = { mode: ['legacy'] };   // شکست صفحه از پیش انجام شده؛ منطق css/avoid کتابخانه خاموش
+            const base = html2pdfLib().set(opt).from(holder);
+            if (!pdf) {
+              const w1 = base.toPdf();
+              await w1;
+              pdf = await w1.get('pdf');
+            } else {
+              const w2 = base.toCanvas();
+              await w2;
+              canvas = await w2.get('canvas');
+              const m = opt.margin;
+              const innerW = pdf.internal.pageSize.getWidth() - m[1] - m[3];
+              const img = canvas.toDataURL('image/jpeg', opt.image.quality);
+              pdf.addPage();
+              pdf.addImage(img, 'JPEG', m[1], m[0], innerW, canvas.height * innerW / canvas.width);
+            }
+            ok = true;
+          } catch (e) {
+            lastPdfError = (e && e.message) ? e.message : String(e);
+            console.error('ساخت صفحه‌ی ' + (i + 1) + ' ناموفق بود (تلاش ' + (attempt + 1) + ')', e);
+            sf *= 0.7;
+          } finally { freeCanvas(canvas); removeHolder(holder); }
+          await tick();
+        }
+        if (!ok) return null;
+      }
+      try { return await blobToValidB64(pdf.output('blob')); }
+      catch (e) { lastPdfError = (e && e.message) ? e.message : String(e); return null; }
+    };
+    const outFixed = await buildFixed();
+    if (!outFixed) lastPdfFailure = 'build';
+    return outFixed;
+  }
+
+  const CONTENT_H = measureH(fullHtml);
 
   /* ---------- مسیر دسته‌ای: سند بلند با چند بخش مستقل ---------- */
   const SINGLE_MAX_H = isLowMem ? 4500 : 9000;  // تا این ارتفاع همان رندر یک‌تکه
