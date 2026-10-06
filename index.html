@@ -9299,7 +9299,6 @@ const REPORT_STYLE = `
   table.meta { width:100%; table-layout:fixed; border-collapse:collapse; margin-bottom:12px; font-size:11px; }
   table.meta td { border:1px solid #cbd5e1; padding:5px 7px; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
   table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
-  table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
   table.meta td:nth-child(even) { width:35%; }
   table.results { width:100%; table-layout:fixed; border-collapse:collapse; font-size:11px; margin-bottom:10px; }
   table.results th, table.results td { border:1px solid #cbd5e1; padding:5px 7px; text-align:right; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; }
@@ -9330,7 +9329,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r9';
+const APP_BUILD = 'B-14050626r10';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -9454,39 +9453,73 @@ function rangedPdfFileName(prefix, count) {
   return prefix + '-' + j + '-' + count + '.pdf';
 }
 
-/**
- * «PDF پشت‌سرهم»: همان رندرِ چاپ پشت‌سرهم (هر برگه پشت هم در یک سند A4)،
- * این‌بار به‌صورت **فایل PDF دانلودشددنی** — با همان موتور html2pdf که برای
- * PDF گوگل‌درایو استفاده می‌شود، پس خروجی دقیقاً شبیه برگه‌ی چاپی است.
- */
+/* مسیر دوگانه‌ی خروجی PDF:
+   ۱) سرور (render_pdf): PDF متن‌محور و سبک، ولی نیازمند اینترنت و سرور به‌روز؛
+   ۲) مرورگر (html2pdf): بدون وابستگی به سرور، برای هر تعداد برگه (دسته‌ای).
+   اگر مسیر ۱ شکست بخورد (آفلاین، سرور قدیمی، تایم‌اوت، حجم زیاد، خطای موتور گوگل) خودکار مسیر ۲ اجرا
+   می‌شود تا کاربر هرگز فقط با یک پیام خطا تنها نماند. بعد از تایم‌اوت/سرور قدیمی، چند دقیقه مستقیم
+   سراغ مرورگر می‌رویم تا هر بار دقیقه‌ها برای سرور خراب منتظر نمانیم. */
+let pdfServerSkipUntil = 0;
+function pdfServerErrorText(e) {
+  const m = String((e && e.message) || e || '').trim();
+  if (/action نامعتبر/.test(m)) return 'سرور شما قدیمی است و render_pdf را نمی‌شناسد. ' + SERVER_UPDATE_HOWTO;
+  return m || 'خطای نامشخص';
+}
+function noteServerPdfFailure(e) {
+  const m = String((e && e.message) || e || '');
+  if (e && e.timeout) pdfServerSkipUntil = Date.now() + 10 * 60 * 1000;
+  else if (/action نامعتبر/.test(m)) pdfServerSkipUntil = Date.now() + 60 * 60 * 1000;
+}
+
 async function downloadSequentialPdf(records, org, notify) {
   if (!Array.isArray(records) || !records.length) return false;
-  if (notify) notify('در حال ساخت PDF (' + toPersianDigits(records.length) + ' برگه)…', 'info');
+  const say = (m, t) => { if (notify) notify(m, t || 'info'); };
+  const count = records.length;
+  const fileName = rangedPdfFileName('گزارش-پشت‌سرهم', count);
+  const cfg = resolveCloudConfig(org || {});
+  const hasServer = !!(cfg && cfg.url && cfg.apiKey);
+  say('در حال آماده‌سازی PDF (' + toPersianDigits(count) + ' برگه)…');
+
+  // تصاویر بیرونی (امضا/عکس/لوگو) از درایو؛ شکست آن مانع خروجی نمی‌شود
+  let preparedOrg = org || {}, light = records;
   try {
-    const cfg = resolveCloudConfig(org || {});
-    if (!(cfg && cfg.url && cfg.apiKey)) {
-      if (notify) notify('برای دانلود PDF دقیق، اتصال سرور لازم است. ابتدا اتصال Google Apps Script را بررسی کنید.', 'error');
-      return false;
+    if (hasServer) {
+      preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
+      light = await hydrateRecordsForPdf(records, cfg.url, cfg.apiKey);
     }
-    const preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
-    const hydrated = await hydrateRecordsForPdf(records, cfg.url, cfg.apiKey);
-    const light = await Promise.all(hydrated.map(withLightPhotos));
-    const body = light.map(r => recordReportHtml(r, preparedOrg)).join('');
-    if (body.length > 6500000) {
-      if (notify) notify('حجم گزارش برای یک PDF واحد زیاد است؛ تعداد برگه‌ها یا بازه را کمتر کنید.', 'error');
-      return false;
+    light = await Promise.all(light.map(withLightPhotos));
+  } catch (e) { light = records; }
+
+  let serverErr = '';
+  if (hasServer && Date.now() >= pdfServerSkipUntil) {
+    try {
+      const body = light.map(r => recordReportHtml(r, preparedOrg)).join('');
+      if (body.length > 6500000) throw new Error('حجم گزارش برای یک درخواست سرور زیاد است (' + Math.round(body.length / 1e6) + ' میلیون کاراکتر).');
+      say('در حال ساخت PDF روی سرور… (برای تعداد زیاد ممکن است چند دقیقه طول بکشد)');
+      const t0 = Date.now();
+      const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
+        { html: body, style: REPORT_STYLE + SERVER_FALLBACK_STYLE }, cloudFolderName(preparedOrg));
+      if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
+      if (!downloadBase64Pdf(res.pdfBase64, fileName)) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
+      say('PDF متن‌محور (' + toPersianDigits(count) + ' برگه) دانلود شد — ' + toPersianDigits(Math.round((Date.now() - t0) / 1000)) + ' ثانیه.', 'success');
+      return true;
+    } catch (e) {
+      serverErr = pdfServerErrorText(e);
+      noteServerPdfFailure(e);
+      console.warn('render_pdf ناموفق؛ مسیر مرورگر', e);
     }
-    const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
-      { html: body, style: REPORT_STYLE + SERVER_FALLBACK_STYLE }, cloudFolderName(preparedOrg));
-    if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
-    if (!downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-پشت‌سرهم', records.length))) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
-    if (notify) notify('PDF واقعی و متن‌محور (' + toPersianDigits(records.length) + ' برگه) دانلود شد.', 'success');
-    return true;
-  } catch (e) {
-    lastPdfError = (e && e.message) ? e.message : String(e);
-    if (notify) notify('ساخت PDF ناموفق بود: ' + lastPdfError, 'error');
-    return false;
   }
+
+  say((serverErr ? 'ساخت روی سرور انجام نشد (' + serverErr.slice(0, 160) + '). ' : '') + 'در حال ساخت PDF در مرورگر…');
+  try {
+    const b64 = await htmlToPdfBase64(light.map(r => recordReportHtml(r, preparedOrg)), REPORT_STYLE);
+    if (b64 && downloadBase64Pdf(b64, fileName)) {
+      say('PDF (' + toPersianDigits(count) + ' برگه) در مرورگر ساخته و دانلود شد.', 'success');
+      return true;
+    }
+  } catch (e) { lastPdfError = (e && e.message) ? e.message : String(e); }
+  say(pdfFailureMessage() + (serverErr ? ' | خطای سرور: ' + serverErr.slice(0, 200) : ''), 'error');
+  return false;
 }
 
 /* ============================================================
@@ -9496,11 +9529,16 @@ async function downloadSequentialPdf(records, org, notify) {
    هر ~۱۱۷۳px برش می‌دهد (چون عرض سند ۷۹۴px است نه ۶۸۸px). نتیجه: فاصله‌ی خالی بزرگ + بریده‌شدن
    جدول‌ها و کادرها وسط صفحه. این‌جا صفحه‌ها را خودمان در مرورگر می‌چینیم (اندازه‌گیریِ واقعی هر
    ردیف)؛ هر صفحه یک برگه‌ی A4 با ارتفاع ثابت است و PDF فقط از هر صفحه یک عکس می‌گیرد. */
-const NC_PAGE_H = 1170;      // ارتفاع محتوای هر صفحه (px، در عرض ۷۹۴) — کمی کمتر از ۱۱۷۳ تا هیچ‌گاه به صفحه‌ی دوم نریزد
-const NC_BODY_H = 1122;      // بدنه (بدون پانویس)
-const NC_FIT_LIMIT = 1112;   // حد مجاز محتوا؛ ۱۰px حاشیه‌ی امن برای اختلاف گردکردن
+/* هندسه‌ی صفحه برای مسیر مرورگر (html2pdf): کتابخانه محتوا را داخل ظرفی به‌عرض «عرض A4 منهای حاشیه‌ها»
+   (۲۱۰−۲۸=۱۸۲mm ≈ ۶۸۷٫۹px) می‌گذارد. قبلاً محتوا ۷۹۴px عرض داشت و ~۱۰۶px از لبه‌ی چپ (در RTL: ستون‌های
+   آخر جدول، مثل «حیاتی»/«امتیاز»، و در صفحه‌های عدم انطباق تا ~۴۰٪ عرض) بریده می‌شد. حالا همه‌چیز در
+   عرض ۶۸۷px چیده می‌شود؛ ظرفیت هر صفحه‌ی A4 در این عرض ≈ ۱۰۱۵px است. */
+const PDF_CSS_W = 687;
+const NC_PAGE_H = 1012;      // ارتفاع هر صفحه (px، در عرض ۶۸۷) — کمی کمتر از ۱۰۱۵ تا هیچ‌گاه به صفحه‌ی دوم نریزد
+const NC_BODY_H = 964;       // بدنه (بدون پانویس)
+const NC_FIT_LIMIT = 954;    // حد مجاز محتوا؛ ۱۰px حاشیه‌ی امن برای اختلاف گردکردن
 const NC_PAGE_STYLE = `
-  .nc-page { width:794px; height:${NC_PAGE_H}px; box-sizing:border-box; background:#fff; color:#0f172a; direction:rtl;
+  .nc-page { width:${PDF_CSS_W}px; height:${NC_PAGE_H}px; box-sizing:border-box; background:#fff; color:#0f172a; direction:rtl;
              font-family:Tahoma,sans-serif; display:flex; flex-direction:column; overflow:hidden; }
   .nc-page * { box-sizing:border-box; }
   .nc-body { height:${NC_BODY_H}px; overflow:hidden; flex:none; }
@@ -9579,7 +9617,7 @@ async function buildNcPages(ncRecords, org, rangeLabel) {
   // ---- جعبه‌ی اندازه‌گیری (خارج از صفحه، با همان عرض و استایل)
   const box = document.createElement('div');
   box.setAttribute('dir', 'rtl');
-  box.style.cssText = 'position:absolute;left:-12000px;top:0;width:794px;visibility:hidden;pointer-events:none;';
+  box.style.cssText = 'position:absolute;left:-12000px;top:0;width:' + PDF_CSS_W + 'px;visibility:hidden;pointer-events:none;';
   box.innerHTML = '<style>' + NC_PAGE_STYLE + '</style>';
   document.body.appendChild(box);
   const pages = [];
@@ -9845,38 +9883,59 @@ const NC_SERVER_STYLE = `
   img { max-width:100%; }
 `;
 
-/** ساخت و دانلود PDF گزارش عدم انطباق‌ها — مسیر اصلی: HTML واقعی سمت سرور */
+/** ساخت و دانلود PDF گزارش عدم انطباق‌ها — اول سرور (HTML واقعی)، در صورت شکست مرورگر (صفحه‌های ثابت A4) */
 async function downloadNonconformityPdf(ncRecords, org, rangeLabel, notify) {
+  const say = (m, t) => { if (notify) notify(m, t || 'info'); };
   if (!Array.isArray(ncRecords) || !ncRecords.length) {
-    if (notify) notify('در این مجموعه عدم انطباقی وجود ندارد.', 'error');
+    say('در این مجموعه عدم انطباقی وجود ندارد.', 'error');
     return false;
   }
-  if (notify) notify('در حال ساخت گزارش عدم انطباق… چند لحظه صبر کنید.', 'info');
+  const count = ncRecords.length;
+  const fileName = rangedPdfFileName('گزارش-عدم-انطباق', count);
+  const cfg = resolveCloudConfig(org || {});
+  const hasServer = !!(cfg && cfg.url && cfg.apiKey);
+  say('در حال ساخت گزارش عدم انطباق (' + toPersianDigits(count) + ' برگه)…');
+
+  let preparedOrg = org || {}, light = ncRecords;
   try {
-    const cfg = resolveCloudConfig(org || {});
-    if (!(cfg && cfg.url && cfg.apiKey)) {
-      if (notify) notify('برای ساخت گزارش عدم انطباق دقیق، اتصال سرور لازم است.', 'error');
-      return false;
+    if (hasServer) {
+      preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
+      light = await hydrateRecordsForPdf(ncRecords, cfg.url, cfg.apiKey);
     }
-    const preparedOrg = await hydrateOrgForPdf(org || {}, cfg.url, cfg.apiKey);
-    const hydrated = await hydrateRecordsForPdf(ncRecords, cfg.url, cfg.apiKey);
-    const light = await Promise.all(hydrated.map(withLightPhotos));
-    const html = buildNcServerHtml(light, preparedOrg, rangeLabel);
-    if (html.length > 6500000) {
-      if (notify) notify('حجم گزارش عدم انطباق برای یک PDF واحد زیاد است؛ فیلتر را محدودتر کنید.', 'error');
-      return false;
+    light = await Promise.all(light.map(withLightPhotos));
+  } catch (e) { light = ncRecords; }
+
+  let serverErr = '';
+  if (hasServer && Date.now() >= pdfServerSkipUntil) {
+    try {
+      const html = buildNcServerHtml(light, preparedOrg, rangeLabel);
+      if (html.length > 6500000) throw new Error('حجم گزارش برای یک درخواست سرور زیاد است (' + Math.round(html.length / 1e6) + ' میلیون کاراکتر).');
+      say('در حال ساخت PDF روی سرور… (ممکن است چند دقیقه طول بکشد)');
+      const t0 = Date.now();
+      const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
+        { html: html, style: NC_SERVER_STYLE }, cloudFolderName(preparedOrg));
+      if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
+      if (!downloadBase64Pdf(res.pdfBase64, fileName)) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
+      say('گزارش عدم انطباق‌ها (PDF متن‌محور) دانلود شد — ' + toPersianDigits(Math.round((Date.now() - t0) / 1000)) + ' ثانیه.', 'success');
+      return true;
+    } catch (e) {
+      serverErr = pdfServerErrorText(e);
+      noteServerPdfFailure(e);
+      console.warn('render_pdf (عدم انطباق) ناموفق؛ مسیر مرورگر', e);
     }
-    const res = await signedCall(cfg.url, cfg.apiKey, 'render_pdf',
-      { html: html, style: NC_SERVER_STYLE }, cloudFolderName(preparedOrg));
-    if (!res || !res.ok || !res.pdfBase64) throw new Error((res && (res.error || res.message)) || 'سرور PDF معتبری برنگرداند.');
-    if (!downloadBase64Pdf(res.pdfBase64, rangedPdfFileName('گزارش-عدم-انطباق', ncRecords.length))) throw new Error(lastPdfError || 'PDF دریافتی نامعتبر است.');
-    if (notify) notify('گزارش عدم انطباق‌ها با قالب A4 و PDF متن‌محور دانلود شد.', 'success');
-    return true;
-  } catch (e) {
-    lastPdfError = (e && e.message) ? e.message : String(e);
-    if (notify) notify('ساخت گزارش عدم انطباق ناموفق بود: ' + lastPdfError, 'error');
-    return false;
   }
+
+  say((serverErr ? 'ساخت روی سرور انجام نشد (' + serverErr.slice(0, 160) + '). ' : '') + 'در حال ساخت گزارش در مرورگر…');
+  try {
+    const pages = await buildNcPages(light, preparedOrg, rangeLabel);
+    const b64 = await htmlToPdfBase64(pages, REPORT_STYLE + NC_PAGE_STYLE, { pageCssH: NC_PAGE_H });
+    if (b64 && downloadBase64Pdf(b64, fileName)) {
+      say('گزارش عدم انطباق‌ها در مرورگر ساخته و دانلود شد.', 'success');
+      return true;
+    }
+  } catch (e) { lastPdfError = (e && e.message) ? e.message : String(e); }
+  say(pdfFailureMessage() + (serverErr ? ' | خطای سرور: ' + serverErr.slice(0, 200) : ''), 'error');
+  return false;
 }
 
 /* ============================================================
@@ -11129,7 +11188,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 8.8
+ *  نسخه: 9.1
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -11191,6 +11250,13 @@ const APPS_SCRIPT_CODE = `/**
  *        getFolderById. اگر پوشه پاک/به سطل زباله رفته باشد خودکار دوباره ساخته می‌شود.
  *      • recordToSpreadsheet فقط برای گرفتن لینک، شیت را دوباره با openById باز می‌کرد؛ حالا ss.getUrl().
  *      • عملیات تازه‌ی records.signatures: گرفتن چند تصویر امضا در یک درخواست (به‌جای یک درخواست برای هر امضا).
+ *
+ *  ۱۴. بازبینی خروجی (نسخه ۹.۱):
+ *      • render_pdf: پاک‌سازی کامل HTML/CSS ورودی — فقط تصویر data: مجاز است؛ هر آدرس بیرونی
+ *        (src/href/url()/@import)، iframe/object/embed/link/meta/form و event handler حذف می‌شود تا
+ *        سرور به‌عنوان «پروکسی دریافت آدرس دلخواه» سوءاستفاده نشود. پاسخ، زمان ساخت (ms) را هم دارد.
+ *      • media.images: کش ۶ ساعته‌ی تصاویر کوچک (امضاها) با CacheService.getAll/putAll؛ تصاویر
+ *        تکراری دوباره از Drive خوانده نمی‌شوند. سقف زمانی ۱۵۰ ثانیه برای یک درخواست.
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -11222,7 +11288,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "9.0";
+var SERVER_VERSION = "9.1";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -13253,17 +13319,34 @@ function saveDataUrlFile_(folder, subName, fileName, dataUrl) {
 function handleMediaBatchGet(body) {
   var ids = body && body.fileIds;
   if (!Array.isArray(ids)) return err("fileIds باید آرایه باشد.");
-  ids = ids.map(function (x) { return String(x || "").trim(); }).filter(Boolean).slice(0, 30);
-  var images = {};
+  var seen = {};
+  ids = ids.map(function (x) { return String(x || "").trim(); })
+           .filter(function (x) { if (!x || seen[x]) return false; seen[x] = 1; return true; })
+           .slice(0, 30);
+  var images = {}, cached = 0, fetched = 0, failed = 0;
+  // کش ۶ ساعته: تصاویر کوچک (امضاها) دوباره از Drive خوانده نمی‌شوند
+  var cache = null, hit = {};
+  try {
+    cache = CacheService.getScriptCache();
+    hit = cache.getAll(ids.map(function (id) { return "img_" + id; })) || {};
+  } catch (eCache) { cache = null; hit = {}; }
+  var toPut = {};
+  var t0 = nowMs();
   for (var i = 0; i < ids.length; i++) {
+    var id = ids[i], ck = "img_" + id;
+    if (hit[ck]) { images[id] = hit[ck]; cached++; continue; }
+    if (nowMs() - t0 > 150000) { failed++; continue; }   // سقف زمانی؛ باقی‌مانده در تلاش بعدی
     try {
-      var f = DriveApp.getFileById(ids[i]);
+      var f = DriveApp.getFileById(id);
       var mt = f.getMimeType() || "application/octet-stream";
-      if (mt.indexOf("image/") !== 0) continue;
-      images[ids[i]] = "data:" + mt + ";base64," + Utilities.base64Encode(f.getBlob().getBytes());
-    } catch (e) { /* فایل حذف شده/بدون دسترسی؛ از پاسخ حذف می‌شود */ }
+      if (mt.indexOf("image/") !== 0) { failed++; continue; }
+      var url = "data:" + mt + ";base64," + Utilities.base64Encode(f.getBlob().getBytes());
+      images[id] = url; fetched++;
+      if (url.length < 95000) toPut[ck] = url;       // سقف ۱۰۰KB هر کلید کش
+    } catch (e) { failed++; /* فایل حذف شده/بدون دسترسی؛ از پاسخ حذف می‌شود */ }
   }
-  return { ok:true, status:"success", images:images };
+  if (cache) { try { if (Object.keys(toPut).length) cache.putAll(toPut, 21600); } catch (ePut) {} }
+  return { ok:true, status:"success", images:images, cached:cached, fetched:fetched, failed:failed };
 }
 
 function handleSignatureGet(ss, body) {
@@ -13363,17 +13446,53 @@ function notifyCriticalFailure(rec, fileUrl) {
    این مسیر فایل موقت Drive نمی‌سازد. HTML احراز‌شده مستقیماً به PDF تبدیل
    می‌شود و PDF واقعی (متن قابل انتخاب/جست‌وجو) به کلاینت برمی‌گردد.
    ===================================================================== */
+/* ---------------------------------------------------------------------
+   پاک‌سازی ورودی render_pdf: HTML از کلاینت می‌آید؛ فقط تصویر data: اجازه‌ی ورود دارد.
+   --------------------------------------------------------------------- */
+function sanitizeCssForPdf_(css) {
+  return String(css || "")
+    .replace(/@import[^;{]*;?/gi, "")
+    .replace(/expression\\s*\\([^)]*\\)/gi, "")
+    .replace(/javascript\\s*:/gi, "")
+    .replace(/url\\(\\s*(['"]?)\\s*(?!data:image\\/)[^)]*\\1\\s*\\)/gi, "none");
+}
+
+function sanitizeHtmlForPdf_(html) {
+  var h = String(html || "");
+  // تگ‌های اجرایی/بارگیرنده (با محتوا)
+  h = h.replace(/<(script|iframe|object|embed|applet|frameset|frame)\\b[\\s\\S]*?<\\/\\1\\s*>/gi, "");
+  // تگ‌های تکی یا بسته‌نشده
+  h = h.replace(/<\\/?(script|iframe|object|embed|applet|frameset|frame|link|base|meta|form|input|button|textarea|select|audio|video|source|track)\\b[^>]*>/gi, "");
+  // event handler ها (با کوتیشن یا بدون آن)
+  h = h.replace(/\\s+on[a-z]+\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)/gi, "");
+  // آدرس‌ها: فقط data:image و لنگر داخلی (#) مجاز است
+  h = h.replace(/\\s(src|href|background|poster|action|formaction|data|xlink:href)\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))/gi,
+    function (m, name, q, v1, v2, v3) {
+      var v = String(v1 !== undefined ? v1 : (v2 !== undefined ? v2 : (v3 || ""))).replace(/^\\s+/, "");
+      if (/^data:image\\/(png|jpe?g|gif|webp);base64,/i.test(v)) return m;
+      if (v === "" || v.charAt(0) === "#") return m;
+      return "";
+    });
+  // CSS داخل <style> و style=""
+  h = h.replace(/<style\\b[^>]*>([\\s\\S]*?)<\\/style>/gi, function (m, inner) {
+    var cleaned = sanitizeCssForPdf_(inner);
+    return m.replace(inner, function () { return cleaned; });
+  });
+  h = h.replace(/\\sstyle\\s*=\\s*("[^"]*"|'[^']*')/gi, function (m) { return sanitizeCssForPdf_(m); });
+  return h;
+}
+
 function handleRenderPdf(data) {
+  var t0 = nowMs();
   data = data || {};
   var html = String(data.html || "");
   if (!html || html.length < 20) return err("محتوای HTML برای ساخت PDF خالی است.");
   if (html.length > 8000000) return err("حجم گزارش برای ساخت PDF بیش از حد مجاز است؛ بازه را کوچک‌تر کنید.");
 
-  // HTML از کاربر/کلاینت می‌آید؛ اسکریپت و event handlerها نباید وارد موتور تبدیل شوند.
-  html = html.replace(/<script[\\s\\S]*?<\\/script>/gi, "")
-             .replace(/\\s+on[a-z]+\\s*=\\s*([\\"']).*?\\1/gi, "");
+  // HTML از کاربر/کلاینت می‌آید؛ فقط تصویر data: مجاز است (جلوگیری از دریافت آدرس دلخواه توسط سرور).
+  html = sanitizeHtmlForPdf_(html);
 
-  var css = String(data.style || "") + "\\n" +
+  var css = sanitizeCssForPdf_(String(data.style || "")) + "\\n" +
     "@page{size:A4 portrait;margin:12mm;}" +
     "html,body{margin:0;padding:0;background:#fff;color:#0f172a;direction:rtl;}" +
     "body{font-family:Tahoma,Arial,sans-serif;font-size:11pt;line-height:1.55;}" +
@@ -13405,7 +13524,7 @@ function handleRenderPdf(data) {
     if (!bytes || bytes.length < 1000) return err("موتور PDF سرور خروجی معتبری تولید نکرد.");
     var head = Utilities.newBlob(bytes.slice(0, Math.min(16, bytes.length))).getDataAsString();
     if (head.slice(0,5) !== "%PDF-") return err("موتور PDF سرور فایل PDF معتبر برنگرداند.");
-    return { ok:true, status:"success", pdfBase64:Utilities.base64Encode(bytes), bytes:bytes.length };
+    return { ok:true, status:"success", pdfBase64:Utilities.base64Encode(bytes), bytes:bytes.length, htmlChars:html.length, ms:nowMs() - t0 };
   } catch (e) {
     return err("ساخت PDF سمت سرور ناموفق بود: " + (e && e.message ? e.message : String(e)));
   }
@@ -13881,31 +14000,54 @@ function cloudFolderName(org) {
  * content-type به‌عمد text/plain است تا مرورگر درخواست preflight (OPTIONS) نفرستد،
  * چون Apps Script از آن پشتیبانی نمی‌کند.
  */
-async function callAppsScript(url, envelope) {
+/* سقف انتظار هر درخواست (میلی‌ثانیه). قبلاً هیچ سقفی نبود: اگر Apps Script گیر می‌کرد (مثلاً تبدیل
+   HTML→PDF سنگین) دکمه‌ی خروجی بی‌پایان در حالت «در حال ساخت…» می‌ماند. سرورِ گوگل خودش بعد از ۶ دقیقه
+   قطع می‌کند، پس سقف‌ها کمی کمتر از آن‌اند. */
+const DEFAULT_CALL_TIMEOUT_MS = 120000;
+const ACTION_TIMEOUT_MS = { render_pdf: 280000, save_record: 200000, backup: 200000, 'media.images': 90000, 'records.signatures': 90000 };
+
+async function callAppsScript(url, envelope, opts) {
   if (!url) throw new Error('آدرس اسکریپت گوگل در تنظیمات وارد نشده است.');
-  let res;
+  const ms = (opts && opts.timeoutMs) || ACTION_TIMEOUT_MS[envelope && envelope.action] || DEFAULT_CALL_TIMEOUT_MS;
+  const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch (e) {} }, ms) : null;
+  const timeoutErr = () => {
+    const te = new Error('پاسخی از سرور نرسید (زمان انتظار ' + Math.round(ms / 1000) + ' ثانیه تمام شد).');
+    te.network = true; te.timeout = true;
+    return te;
+  };
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(envelope),
-      redirect: 'follow',
-    });
-  } catch (e) {
-    const netErr = new Error('اتصال شبکه برقرار نشد (اینترنت یا آدرس اسکریپت را بررسی کنید).');
-    netErr.network = true;
-    throw netErr;
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(envelope),
+        redirect: 'follow',
+        signal: ctl ? ctl.signal : undefined,
+      });
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw timeoutErr();
+      const netErr = new Error('اتصال شبکه برقرار نشد (اینترنت یا آدرس اسکریپت را بررسی کنید).');
+      netErr.network = true;
+      throw netErr;
+    }
+    let json;
+    try { json = await res.json(); }
+    catch (e) {
+      if (e && e.name === 'AbortError') throw timeoutErr();
+      throw new Error('پاسخ سرور قابل خواندن نبود (ممکن است آدرس اسکریپت نادرست باشد یا دیپلویمنت منقضی شده باشد).');
+    }
+    if (!json || json.ok === false) {
+      const e2 = new Error((json && (json.error || json.message)) || 'خطای نامشخص از سرور.');
+      e2.code = json && json.code;
+      e2.server = true;
+      throw e2;
+    }
+    return json;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  let json;
-  try { json = await res.json(); }
-  catch (e) { throw new Error('پاسخ سرور قابل خواندن نبود (ممکن است آدرس اسکریپت نادرست باشد یا دیپلویمنت منقضی شده باشد).'); }
-  if (!json || json.ok === false) {
-    const e2 = new Error((json && (json.error || json.message)) || 'خطای نامشخص از سرور.');
-    e2.code = json && json.code;
-    e2.server = true;
-    throw e2;
-  }
-  return json;
 }
 
 /**
@@ -13922,9 +14064,9 @@ async function buildEnvelope(action, payload, apiKey, folderName) {
   return env;
 }
 
-async function signedCall(url, apiKey, action, payload, folderName) {
+async function signedCall(url, apiKey, action, payload, folderName, opts) {
   const env = await buildEnvelope(action, payload, apiKey, folderName);
-  return callAppsScript(url, env);
+  return callAppsScript(url, env, opts);
 }
 /* @core-end: transport */
 
@@ -14008,11 +14150,11 @@ async function htmlToPdfBase64(innerHtml, styleCss, opts) {
   const buildHolder = (htmlStr) => {
     const wrap = document.createElement('div');
     wrap.setAttribute('data-pdf-wrap', '1');
-    wrap.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;z-index:-1;pointer-events:none;';
+    wrap.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + PDF_CSS_W + 'px;z-index:-1;pointer-events:none;';
     const holder = document.createElement('div');
     holder.setAttribute('data-pdf-holder', '1');
     holder.setAttribute('dir', 'rtl');
-    holder.style.cssText = 'width:794px;background:#fff;';
+    holder.style.cssText = 'width:' + PDF_CSS_W + 'px;background:#fff;';
     holder.innerHTML = '<style>' + (styleCss || '') + '</style>' + htmlStr;
     wrap.appendChild(holder);
     document.body.appendChild(wrap);
@@ -14079,7 +14221,7 @@ async function htmlToPdfBase64(innerHtml, styleCss, opts) {
   const PIXEL_BUDGET = isLowMem ? 7000000 : 13000000; // زیر سقف iOS/موبایل با حاشیه‌ی امن
   const PDF_MAX_SCALE = 1.5;
   const scaleFor = (H) => {
-    const fit = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (794 * Math.max(H, 600)))));
+    const fit = Math.max(0.7, Math.min(2, Math.sqrt(PIXEL_BUDGET / (PDF_CSS_W * Math.max(H, 600)))));
     return Math.min(PDF_MAX_SCALE, Math.round(fit * 100) / 100);
   };
   const optFor = (sc) => ({
@@ -14087,7 +14229,11 @@ async function htmlToPdfBase64(innerHtml, styleCss, opts) {
     // برگه‌ای که کاربر در پنجره‌ی چاپ می‌بیند، با همان حاشیه در فایل ذخیره شود.
     margin: [14, 14, 14, 14],
     image: { type: 'jpeg', quality: sc >= 1.4 ? 0.85 : 0.8 },
-    html2canvas: { scale: sc, useCORS: true, windowWidth: 794, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
+    // width/x: بدون این دو، عرض بوم از «موقعیت ظرف در صفحه‌ی اصلی» تأثیر می‌گرفت: روی هر مرورگری که پهنایش
+    // از ~۶۸۸px بیشتر باشد (همه‌ی دسکتاپ‌ها و تبلت‌ها) ظرفِ وسط‌چین‌شده‌ی html2pdf از سمت راست بریده می‌شد؛
+    // مثلاً در ۱۲۸۰px فقط ~۵۷٪ و در ۱۹۲۰px فقط ~۱۰٪ عرض گزارش در PDF می‌آمد (ستون‌های «امتیاز/حیاتی»
+    // و سمت چپِ صفحه‌های عدم انطباق ناپدید می‌شدند). با عرض و x صریح، خروجی به پهنای پنجره وابسته نیست.
+    html2canvas: { scale: sc, useCORS: true, windowWidth: PDF_CSS_W, width: PDF_CSS_W, x: 0, y: 0, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, onclone: onclone },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'] },
   });
@@ -14114,6 +14260,10 @@ async function htmlToPdfBase64(innerHtml, styleCss, opts) {
               const w1 = base.toPdf();
               await w1;
               pdf = await w1.get('pdf');
+              // ارتفاع صفحه‌ی اول ممکن است چند پیکسل از ظرفیت یک صفحه‌ی A4 بیشتر گرد شود و کتابخانه یک
+              // صفحه‌ی سفیدِ اضافه بسازد (در اندازه‌گیری: ۷ صفحه ← ۸ صفحه‌ی PDF با صفحه‌ی ۲ سفید).
+              // هر صفحه‌ی ثابت باید دقیقاً یک صفحه‌ی PDF باشد؛ مازاد حذف می‌شود.
+              try { while (pdf.internal.getNumberOfPages() > 1) pdf.deletePage(pdf.internal.getNumberOfPages()); } catch (eTrim) {}
             } else {
               const w2 = base.toCanvas();
               await w2;
@@ -14266,9 +14416,8 @@ async function htmlToPdfBase64(innerHtml, styleCss, opts) {
   if (b64) {
     // اگر محتوا به‌قدر کافی بلند است که باید چندصفحه‌ای شود ولی خروجی تک‌صفحه
     // آمد، یعنی html2canvas بخشی را از دست داده → با مقیاس پایین‌تر دوباره.
-    // ارتفاع محتوای هر صفحه: (۲۹۷−۲۸)/(۲۱۰−۲۸)×۷۹۴ ≈ ۱۱۷۳px (نه ۱۰۱۶) — عدد قبلی صفحه‌ها را بیش‌ازحد
-    // تخمین می‌زد و می‌توانست رندر دوم (دو برابر زمان) را بی‌دلیل راه بیندازد.
-    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 1170));
+    // ظرفیت هر صفحه در عرض ۶۸۷px: (۲۹۷−۲۸)/(۲۱۰−۲۸)×۶۸۷ ≈ ۱۰۱۵px.
+    const expectedPages = Math.max(1, Math.ceil(CONTENT_H / 1010));
     if (expectedPages > 1) {
       const got = pdfPageCount(b64);
       if (got > 0 && got < expectedPages) {
@@ -14318,15 +14467,18 @@ async function fetchExternalImages(fileIds, url, apiKey) {
   if (!ids.length || !url || !apiKey) return out;
   const chunks = [];
   for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
-  for (const chunk of chunks) {
-    try {
-      const res = await Promise.race([
-        signedCall(url, apiKey, 'media.images', { fileIds: chunk }),
-        new Promise(r => setTimeout(() => r(null), 25000)),
-      ]);
-      if (res && res.ok && res.images) Object.assign(out, res.images);
-    } catch (e) { /* فایل گمشده/سرور قدیمی؛ باقی خروجی بدون آن تصویر ادامه می‌یابد */ }
-  }
+  // دسته‌ها هم‌زمان (حداکثر ۳ درخواست) گرفته می‌شوند؛ قبلاً پشت‌سرهم و هر کدام تا ۲۵ ثانیه منتظر
+  let next = 0;
+  const worker = async () => {
+    while (next < chunks.length) {
+      const chunk = chunks[next++];
+      try {
+        const res = await signedCall(url, apiKey, 'media.images', { fileIds: chunk }, undefined, { timeoutMs: 90000 });
+        if (res && res.ok && res.images) Object.assign(out, res.images);
+      } catch (e) { /* فایل گمشده/سرور قدیمی/تایم‌اوت؛ باقی خروجی بدون آن تصویر ادامه می‌یابد */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, worker));
   return out;
 }
 
