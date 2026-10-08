@@ -3553,8 +3553,6 @@ function pickSyncableSettings(settings, includeConnection) {
     // حالت جریان امضا باید بین دستگاه‌ها یکی باشد، وگرنه یک بازرس زنجیره می‌سازد
     // و بازرس دیگر برگه‌ی تک‌امضا ثبت می‌کند.
     signFlowMode: s.signFlowMode === 'single' ? 'single' : 'chain',
-    // نشانه‌ی «چک‌لیست‌های پیشنهادی یک‌بار درج شد» (جلوگیری از برگشتن قالب‌های حذف‌شده)
-    libSeeded: s.libSeeded || '',
     managerPinHash: s.managerPinHash || '',
     managerPinSalt: s.managerPinSalt || '',
     managerPinHashAlgo: s.managerPinHashAlgo || '',
@@ -4282,7 +4280,6 @@ function mergeSettings(local, remote, includeConnection) {
   if (r.orgName !== undefined && r.orgName !== '') s.orgName = r.orgName;
   if (Number(r.passThreshold) > 0) s.passThreshold = Number(r.passThreshold);
   if (r.signFlowMode === 'single' || r.signFlowMode === 'chain') s.signFlowMode = r.signFlowMode;
-  if (r.libSeeded && !s.libSeeded) s.libSeeded = r.libSeeded;
   if (r.managerPinHash && !s.managerPinHash) {
     s.managerPinHash = r.managerPinHash;
     s.managerPinSalt = r.managerPinSalt || '';
@@ -7843,6 +7840,26 @@ function libraryTemplatesToSeed(data) {
   return out;
 }
 
+/* نشانه‌ی «بررسی/درج انجام شد» فقط روی همین مرورگر نگه داشته می‌شود (نه در تنظیمات سرور). */
+const LIB_LOCAL_FLAG = 'derkav_lib_seeded_v1';
+function libFlagGet() { try { return localStorage.getItem(LIB_LOCAL_FLAG) || ''; } catch (e) { return ''; } }
+function libFlagSet() { try { localStorage.setItem(LIB_LOCAL_FLAG, LIBRARY_VERSION); } catch (e) {} }
+
+/** تصمیم درج چک‌لیست‌های پیشنهادی.
+    wait = هنوز زود است | skip = قبلاً بررسی شده | mark = جای دیگری درج شده، فقط نشانه بزن | seed = درج کن.
+    • فقط کاربری که حق مدیریت قالب دارد؛
+    • با اتصال ابری، تا اولین همگام‌سازیِ موفق صبر می‌کنیم تا قالب‌های دستگاه‌های دیگر را ببینیم؛
+    • اگر هر قالبی با شناسه‌ی tpl-lib-… از قبل هست (روی دستگاه دیگری درج شده)، دوباره درج نمی‌کنیم. */
+function planLibrarySeed({ data, perms, cloudOn, flag }) {
+  if (!perms || !perms.canManage || !data) return { action: 'wait' };
+  if (flag) return { action: 'skip' };
+  if (cloudOn && !(Number(data.lastSyncAt) > 0)) return { action: 'wait' };
+  const existing = data.templates || [];
+  if (existing.some(t => String(t.id).indexOf('tpl-lib-') === 0)) return { action: 'mark' };
+  const templates = libraryTemplatesToSeed(data);
+  return templates.length ? { action: 'seed', templates } : { action: 'mark' };
+}
+
 function buildReadyTemplate(def, categories, settings) {
   const cats = categories || [];
   const cat = cats.find(c => def.hint && def.hint.test(c)) || cats[0] || '';
@@ -9554,7 +9571,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r11';
+const APP_BUILD = 'B-14050626r12';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -11483,9 +11500,9 @@ const APPS_SCRIPT_CODE = `/**
  *      • media.images: کش ۶ ساعته‌ی تصاویر کوچک (امضاها) با CacheService.getAll/putAll؛ تصاویر
  *        تکراری دوباره از Drive خوانده نمی‌شوند. سقف زمانی ۱۵۰ ثانیه برای یک درخواست.
  *
- *  ۱۵. چک‌لیست‌های پیشنهادی (نسخه ۹.۲): تنظیم همگام‌شونده‌ی «libSeeded». قالب‌های پیشنهادی فقط یک‌بار
- *      (روی دستگاه مدیر، پس از اولین همگام‌سازی) داخل فهرست قالب‌های خود کاربر درج می‌شوند و بعد از آن
- *      با این نشانه روی همه‌ی دستگاه‌ها دیگر درج نمی‌شوند؛ پس قالبی که کاربر حذف کرده برنمی‌گردد.
+ *  ۱۵. چک‌لیست‌های پیشنهادی: کلید تنظیمات «libSeeded» مجاز است ولی برنامه دیگر از آن استفاده نمی‌کند
+ *      (نوشتن تنظیمات فقط با نشست ادمین ممکن است و نبودِ نشست پیام «ورود دوباره» می‌داد). نشانه‌ی «درج شد»
+ *      حالا محلی است و درج بر اساس شناسه‌ی tpl-lib-… انجام می‌شود؛ هیچ تغییری در سرور لازم نیست.
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -16125,26 +16142,20 @@ function AppShell() {
 
   const myPages = useMemo(() => (perms && perms.pages) || effectivePages(currentUser), [perms, currentUser]);
 
-  // چک‌لیست‌های پیشنهادی: یک‌بار، روی دستگاهِ «ادمین»، داخل فهرست قالب‌های خودش درج می‌شوند.
-  // (چرا ادمین: نوشتن «تنظیمات» روی سرور فقط برای ادمین مجاز است و نشانه‌ی «درج شد» جزو تنظیمات
-  //  همگام‌شونده است؛ اگر مدیرِ غیرادمین درج می‌کرد، سرور نشانه را رد می‌کرد و قالب‌های حذف‌شده برمی‌گشتند.)
-  //  • اگر اتصال ابری فعال است، تا اولین همگام‌سازیِ موفق صبر می‌کنیم (تا نشانه‌ی «قبلاً درج شده»‌ی
-  //    دستگاه‌های دیگر را بدانیم و قالب حذف‌شده برنگردد)؛
-  //  • اگر ابری نیست، همان لحظه.
+  // چک‌لیست‌های پیشنهادی: یک‌بار داخل فهرست قالب‌های خودِ مدیر درج می‌شوند. فقط «قالب» نوشته می‌شود (نه
+  // تنظیمات)، پس به نشست ادمین روی سرور نیازی نیست. تصمیم در planLibrarySeed است (تست‌پذیر).
   useEffect(() => {
-    if (!perms || !perms.isAdmin || !data || !data.settings) return;
-    if (data.settings.libSeeded) return;
+    if (!data || !data.settings) return;
     const cfg = resolveCloudConfig(data.settings);
-    const cloudOn = !!(cfg.url && cfg.apiKey);
-    if (cloudOn && !(Number(data.lastSyncAt) > 0)) return;
-    const add = libraryTemplatesToSeed(data);
-    update(d => {
-      add.forEach(t => d.templates.push(t));
-      d.settings.libSeeded = LIBRARY_VERSION;
-    });
-    if (add.length) notify(toPersianDigits(add.length) + ' چک‌لیست پیشنهادی به فهرست قالب‌های شما اضافه شد؛ هر کدام را می‌توانید ویرایش، بایگانی یا حذف کنید.', 'success');
+    const plan = planLibrarySeed({ data, perms, cloudOn: !!(cfg.url && cfg.apiKey), flag: libFlagGet() });
+    if (plan.action === 'wait') return;
+    if (plan.action === 'seed') {
+      update(d => { plan.templates.forEach(t => d.templates.push(t)); });
+      notify(toPersianDigits(plan.templates.length) + ' چک‌لیست پیشنهادی به فهرست قالب‌های شما اضافه شد؛ هر کدام را می‌توانید ویرایش، بایگانی یا حذف کنید.', 'success');
+    }
+    libFlagSet();   // seed / mark / skip: از این به بعد روی این مرورگر دوباره بررسی نمی‌شود
     // eslint-disable-next-line
-  }, [data && data.settings && data.settings.libSeeded, data && data.lastSyncAt, perms && perms.isAdmin]);
+  }, [data && data.lastSyncAt, perms && perms.canManage, data && data.templates && data.templates.length]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
