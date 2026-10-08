@@ -3553,6 +3553,8 @@ function pickSyncableSettings(settings, includeConnection) {
     // حالت جریان امضا باید بین دستگاه‌ها یکی باشد، وگرنه یک بازرس زنجیره می‌سازد
     // و بازرس دیگر برگه‌ی تک‌امضا ثبت می‌کند.
     signFlowMode: s.signFlowMode === 'single' ? 'single' : 'chain',
+    // نشانه‌ی «چک‌لیست‌های پیشنهادی یک‌بار درج شد» (جلوگیری از برگشتن قالب‌های حذف‌شده)
+    libSeeded: s.libSeeded || '',
     managerPinHash: s.managerPinHash || '',
     managerPinSalt: s.managerPinSalt || '',
     managerPinHashAlgo: s.managerPinHashAlgo || '',
@@ -4280,6 +4282,7 @@ function mergeSettings(local, remote, includeConnection) {
   if (r.orgName !== undefined && r.orgName !== '') s.orgName = r.orgName;
   if (Number(r.passThreshold) > 0) s.passThreshold = Number(r.passThreshold);
   if (r.signFlowMode === 'single' || r.signFlowMode === 'chain') s.signFlowMode = r.signFlowMode;
+  if (r.libSeeded && !s.libSeeded) s.libSeeded = r.libSeeded;
   if (r.managerPinHash && !s.managerPinHash) {
     s.managerPinHash = r.managerPinHash;
     s.managerPinSalt = r.managerPinSalt || '';
@@ -4333,6 +4336,22 @@ function itemNonConforming(item, val) {
   if (item.type === 'select' && item.correctValue) return val !== item.correctValue;
   if (item.type === 'expiry') return expiryStatus(val) === 'expired';
   return false;
+}
+/* آیتمی که حتماً باید جواب بگیرد (یا «کاربرد ندارد»): نوع‌های امتیازی که وزن/حیاتی دارند.
+   چک‌باکس پاسخ «نزده» ندارد (خالی = تأیید نشده) و متن/عدد اطلاعاتی‌اند. */
+function itemNeedsAnswer(item) {
+  if (!item) return false;
+  const t = item.type;
+  const scored = t === 'yesno' || t === 'rating' || t === 'expiry' || (t === 'select' && !!item.correctValue);
+  return scored && (Number(item.weight) > 0 || !!item.critical);
+}
+function isAnswered(item, val) {
+  if (val === undefined || val === null) return false;
+  if (typeof val === 'string' && val.trim() === '') return false;
+  return true;
+}
+function unansweredItems(template, answers) {
+  return ((template && template.items) || []).filter(it => itemNeedsAnswer(it) && !isAnswered(it, (answers || {})[it.id]));
 }
 function scoreRecord(template, answers) {
   let earned = 0, totalWeight = 0, criticalFail = false;
@@ -7806,11 +7825,29 @@ const READY_TEMPLATES = [
     desc: 'گواهی فنی، جرثقیل، سیم بکسل، گارد ریل، SWL و تگ‌لاین' },
 ];
 
+/* چک‌لیست‌های پیشنهادی دیگر یک «بخش جدا» نیستند: یک‌بار داخل فهرست قالب‌های خود کاربر درج می‌شوند و از
+   آن به بعد قالب‌هایی کاملاً معمولی‌اند (ویرایش، بایگانی، حذف، زیرسیستم‌دار کردن). شناسه‌ی قالب‌ها ثابت
+   است (tpl-lib-…) تا درج هم‌زمان روی دو دستگاه تکرار نسازد. */
+const LIBRARY_VERSION = 'v1';
+function normTemplateName(s) { return String(s || '').replace(/[\u200c\s]+/g, ' ').trim().toLowerCase(); }
+function libraryTemplatesToSeed(data) {
+  const existing = (data && data.templates) || [];
+  const ids = new Set(existing.map(t => String(t.id)));
+  const names = new Set(existing.map(t => normTemplateName(t.name)));
+  const out = [];
+  READY_TEMPLATES.forEach(def => {
+    const id = 'tpl-lib-' + def.key;
+    if (ids.has(id) || names.has(normTemplateName(def.name))) return;   // قبلاً خودش یا نسخه‌ی هم‌نامش را ساخته
+    out.push(buildReadyTemplate(def, (data && data.categories) || [], (data && data.settings) || {}));
+  });
+  return out;
+}
+
 function buildReadyTemplate(def, categories, settings) {
   const cats = categories || [];
   const cat = cats.find(c => def.hint && def.hint.test(c)) || cats[0] || '';
   return Object.assign({
-    id: 'tpl-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+    id: 'tpl-lib-' + def.key,
     name: def.name,
     category: cat,
     passThreshold: 80,
@@ -8123,7 +8160,7 @@ function TemplatesPage() {
   const { data, update, notify, perms } = useAppData();
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
-  const [showPresets, setShowPresets] = useState(false);
+  const [addSubsFor, setAddSubsFor] = useState(null);
   const [confirmArchive, setConfirmArchive] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [delAssets, setDelAssets] = useState(true);
@@ -8215,8 +8252,6 @@ function TemplatesPage() {
         </div>
         {canManage
           ? <div className="flex flex-wrap gap-2">
-              <button onClick={() => setShowPresets(true)}
-                className="px-4 py-2.5 rounded-xl bg-white border border-brand-200 hover:bg-brand-50 text-brand-700 text-sm font-medium">📋 قالب‌های آماده</button>
               <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ قالب جدید</button>
             </div>
           : <span className="text-xs text-slate-400 bg-slate-100 rounded-xl px-3 py-2.5">حالت فقط‌خواندنی — برای ساخت یا ویرایش قالب به دسترسی مدیر نیاز است</span>}
@@ -8240,6 +8275,7 @@ function TemplatesPage() {
             {canManage ? (
               <div className="flex gap-2 mt-3">
                 <button onClick={() => { setEditing(t); setShowForm(true); }} className="text-xs bg-slate-100 text-slate-600 rounded-lg py-2 px-3 hover:bg-slate-200">ویرایش</button>
+                <button onClick={() => setAddSubsFor(t)} className="text-xs bg-brand-50 text-brand-700 rounded-lg py-2 px-3 hover:bg-brand-100">＋ زیرسیستم</button>
                 <button onClick={() => setConfirmArchive(t)} className="text-xs bg-warn-50 text-warn-700 rounded-lg py-2 px-3 hover:bg-warn-500/20">
                   {t.archived ? 'بازگردانی' : 'بایگانی'}
                 </button>
@@ -8252,25 +8288,21 @@ function TemplatesPage() {
         ))}
       </div>
 
-      <Modal open={showPresets} onClose={() => setShowPresets(false)} wide title="قالب‌های آماده چک‌لیست">
-        <div className="space-y-2">
-          <p className="text-xs text-slate-500">یک قالب را انتخاب کنید؛ در ویرایشگر باز می‌شود و پیش از «ذخیره قالب» می‌توانید آیتم‌ها، وزن‌ها و حیاتی‌بودن را تغییر دهید.</p>
-          {READY_TEMPLATES.map(def => {
-            const n = def.build().length;
-            return (
-              <button key={def.key} type="button"
-                onClick={() => { setEditing(buildReadyTemplate(def, data.categories, data.settings)); setShowPresets(false); setShowForm(true); }}
-                className="w-full text-right flex items-center gap-3 rounded-xl border border-slate-200 hover:border-brand-300 hover:bg-brand-50 p-3 transition">
-                <span className="text-2xl">{def.icon}</span>
-                <span className="flex-1">
-                  <span className="block font-bold text-slate-800 text-sm">{def.name}</span>
-                  <span className="block text-xs text-slate-500 mt-0.5">{def.desc}</span>
-                </span>
-                <span className="text-xs text-slate-400 whitespace-nowrap">{toPersianDigits(n)} آیتم</span>
-              </button>
-            );
-          })}
-        </div>
+      <Modal open={!!addSubsFor} onClose={() => setAddSubsFor(null)} wide title={addSubsFor ? 'افزودن زیرسیستم به «' + addSubsFor.name + '»' : ''}>
+        {addSubsFor && <AddSubsystemsPanel template={addSubsFor} existing={data.assets.filter(a => a.templateId === addSubsFor.id)}
+          onAdd={(list) => {
+            update(d => {
+              list.forEach((a, i) => {
+                d.assets.push(Object.assign({
+                  id: 'asset-' + Date.now() + '-' + i + '-' + Math.floor(Math.random() * 1000),
+                  code: a.code, name: a.name, location: a.location || '', serial: '',
+                  templateId: addSubsFor.id, category: addSubsFor.category || '',
+                }, (a.attrs && Object.keys(a.attrs).length) ? { attrs: a.attrs } : {}));
+              });
+            });
+            notify(toPersianDigits(list.length) + ' زیرسیستم به «' + addSubsFor.name + '» اضافه شد.', 'success');
+            setAddSubsFor(null);
+          }} />}
       </Modal>
       <Modal open={showForm} onClose={() => setShowForm(false)} wide title={editing ? (data.templates.some(x => x.id === editing.id) ? 'ویرایش قالب' : 'قالب جدید — از روی قالب آماده') : 'قالب جدید'}>
         <TemplateEditor key={editing ? editing.id : 'new'} initial={editing} categories={data.categories} settings={data.settings}
@@ -8603,6 +8635,88 @@ function SignChainBox({ users, currentUser, selection, notes, onSelect, onNote, 
  * فرم سریع «زیرسیستم جدید» برای وقتی که چک‌لیست هنوز هیچ تجهیز ندارد —
  * تا کاربر برای افزودن اولین زیرسیستم مجبور نباشد صفحه را ترک کند.
  */
+/* ============================================================
+   افزودن زیرسیستم به یک چک‌لیست — تکی یا گروهی (چسباندن از اکسل)
+   ============================================================ */
+/** هر خط: کد، نام، محل، پلاک، راننده — جداکننده: Tab | ; ، , */
+function parseBulkSubsystems(text) {
+  const rows = [], errors = [];
+  String(text || '').split(/\r?\n/).forEach((line, i) => {
+    if (!line.trim()) return;
+    const c = line.split(/\t|\||;|،|,/).map(x => x.trim());
+    if (!c[0] || !c[1]) { errors.push('خط ' + (i + 1) + ': کد و نام الزامی است'); return; }
+    const attrs = {};
+    if (c[3]) attrs.plate = c[3];
+    if (c[4]) attrs.driver = c[4];
+    rows.push({ code: c[0], name: c[1], location: c[2] || '', attrs });
+  });
+  return { rows, errors };
+}
+
+function AddSubsystemsPanel({ template, existing, onAdd }) {
+  const [mode, setMode] = useState('one');
+  const [f, setF] = useState({ code: '', name: '', location: '', attrs: {} });
+  const [showAttrs, setShowAttrs] = useState(false);
+  const [bulk, setBulk] = useState('');
+  const [err, setErr] = useState('');
+  const used = new Set((existing || []).map(a => String(a.code || '').toLowerCase()));
+  const wantsAttrs = (template.items || []).some(i => i.assetField);
+
+  const addOne = () => {
+    const code = f.code.trim(), name = f.name.trim();
+    if (!code || !name) { setErr('کد و نام زیرسیستم الزامی است.'); return; }
+    if (used.has(code.toLowerCase())) { setErr('زیرسیستمی با این کد در همین چک‌لیست هست.'); return; }
+    onAdd([{ code, name, location: f.location.trim(), attrs: f.attrs }]);
+  };
+  const parsed = parseBulkSubsystems(bulk);
+  const seen = new Set();
+  const fresh = [], dups = [];
+  parsed.rows.forEach(r => {
+    const k = r.code.toLowerCase();
+    if (used.has(k) || seen.has(k)) { dups.push(r.code); return; }
+    seen.add(k); fresh.push(r);
+  });
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-slate-500">این زیرسیستم‌ها با چک‌لیست «{template.name}» بازرسی می‌شوند؛ هنگام اجرا، همین چک‌لیست را انتخاب می‌کنید و فهرست زیرسیستم‌هایش می‌آید.</p>
+      <div className="flex gap-2">
+        <button type="button" onClick={() => setMode('one')} className={'text-xs rounded-lg px-3 py-1.5 border ' + (mode === 'one' ? 'bg-brand-600 text-white border-brand-600' : 'bg-white text-slate-600 border-slate-200')}>یکی</button>
+        <button type="button" onClick={() => setMode('many')} className={'text-xs rounded-lg px-3 py-1.5 border ' + (mode === 'many' ? 'bg-brand-600 text-white border-brand-600' : 'bg-white text-slate-600 border-slate-200')}>چندتا یک‌جا (از اکسل)</button>
+      </div>
+      {mode === 'one' ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <input className={inputCls} placeholder="کد (مثل CAR-01)" value={f.code} onChange={e => setF({ ...f, code: e.target.value })} />
+            <input className={inputCls} placeholder="نام زیرسیستم" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
+            <input className={inputCls} placeholder="محل استقرار (اختیاری)" value={f.location} onChange={e => setF({ ...f, location: e.target.value })} />
+          </div>
+          <button type="button" onClick={() => setShowAttrs(v => !v)} className="text-[11px] text-brand-700 hover:underline">
+            {(showAttrs || wantsAttrs) ? '▾' : '▸'} مشخصات خودرو / ماشین‌آلات (پلاک، راننده، تاریخ‌های اعتبار …){wantsAttrs ? ' — این چک‌لیست از آن‌ها استفاده می‌کند' : ''}
+          </button>
+          {(showAttrs || wantsAttrs) && <AssetAttrsFields value={f.attrs} onChange={at => setF({ ...f, attrs: at })} />}
+          {err && <p className="text-xs text-danger-600">{err}</p>}
+          <div className="flex justify-end"><button type="button" onClick={addOne} className="px-5 py-2.5 rounded-xl text-sm bg-brand-600 hover:bg-brand-700 text-white">افزودن</button></div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-[11px] text-slate-500">هر خط یک زیرسیستم: <b>کد ، نام ، محل ، پلاک ، راننده</b> (دو مورد اول الزامی). از اکسل می‌توانید ستون‌ها را کپی و همین‌جا بچسبانید.</p>
+          <textarea className={inputCls + ' font-mono text-xs'} rows={7} dir="rtl" value={bulk} onChange={e => setBulk(e.target.value)}
+            placeholder={'CAR-01 ، لودر ۱ ، سایت الف ، ۱۲ ب ۳۴۵ ایران ۶۷ ، رضا احمدی\nCAR-02 ، کامیون ۲ ، سایت ب'} />
+          <p className="text-xs text-slate-600">
+            {toPersianDigits(fresh.length)} مورد آماده‌ی افزودن
+            {dups.length > 0 && <span className="text-warn-700"> · {toPersianDigits(dups.length)} کد تکراری رد می‌شود ({dups.slice(0, 4).join('، ')})</span>}
+            {parsed.errors.length > 0 && <span className="text-danger-600"> · {parsed.errors.slice(0, 2).join('؛ ')}</span>}
+          </p>
+          <div className="flex justify-end">
+            <button type="button" disabled={!fresh.length} onClick={() => onAdd(fresh)}
+              className="px-5 py-2.5 rounded-xl text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white">افزودن {toPersianDigits(fresh.length)} زیرسیستم</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QuickSubsystemForm({ template, onAdd }) {
   const [f, setF] = useState({ code: '', name: '', location: '' });
   const [err, setErr] = useState('');
@@ -8626,6 +8740,28 @@ function QuickSubsystemForm({ template, onAdd }) {
     </div>
   );
 }
+
+/* پیش‌نویس بازرسی: چک‌لیست ۵۷ آیتمی را نباید با یک رفرش، تعویض زیرسیستم یا قطعی برق از دست داد.
+   فقط پاسخ‌ها/یادداشت/مهلت در localStorage ذخیره می‌شود (نه عکس و امضا) و ۳ روز اعتبار دارد. */
+const DRAFT_TTL_MS = 3 * 24 * 3600 * 1000;
+function draftKey(userId, templateId, assetId) { return 'chk_draft_v1:' + [userId || '', templateId || '', assetId || ''].join(':'); }
+function loadDraft(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || !d.at || Date.now() - d.at > DRAFT_TTL_MS) { localStorage.removeItem(key); return null; }
+    return d;
+  } catch (e) { return null; }
+}
+function saveDraft(key, payload) {
+  try {
+    const answers = payload.answers || {};
+    if (!Object.keys(answers).length && !payload.notes && !payload.dueDate) { localStorage.removeItem(key); return; }
+    localStorage.setItem(key, JSON.stringify(Object.assign({ at: Date.now() }, payload)));
+  } catch (e) { /* حافظه‌ی پر/حالت خصوصی: بی‌صدا */ }
+}
+function clearDraft(key) { try { localStorage.removeItem(key); } catch (e) {} }
 
 function RunnerPage({ assetId, assignmentId, onFinish }) {
   const { data, update, currentUser, notify, perms } = useAppData();
@@ -8690,13 +8826,29 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
   const [chainOnsiteSigs, setChainOnsiteSigs] = useState({});
   const [onsitePadSlot, setOnsitePadSlot] = useState(null);
 
+  const dKey = draftKey(currentUser && currentUser.id, templateId, selectedAssetId);
+  const [draftRestored, setDraftRestored] = useState(false);
+  const [showMissing, setShowMissing] = useState(false);
   useEffect(() => {
-    // آیتم‌های گره‌خورده به مشخصات تجهیز (پلاک، راننده، تاریخ‌های اعتبار …) خودکار پر می‌شوند
-    setAnswers(prefillAnswersFromAsset(template, asset)); setSignatures({});
+    // آیتم‌های گره‌خورده به مشخصات تجهیز (پلاک، راننده، تاریخ‌های اعتبار …) خودکار پر می‌شوند؛
+    // اگر پیش‌نویس همین چک‌لیست/تجهیز هست، پاسخ‌های ذخیره‌شده روی آن می‌نشیند.
+    const dr = (templateId && selectedAssetId) ? loadDraft(dKey) : null;
+    setAnswers(Object.assign({}, prefillAnswersFromAsset(template, asset), (dr && dr.answers) || {}));
+    setNotes((dr && dr.notes) || ''); setDueDate((dr && dr.dueDate) || '');
+    setDraftRestored(!!(dr && dr.answers && Object.keys(dr.answers).length));
+    setShowMissing(false);
+    setSignatures({});
     setChainSel({}); setChainNotes({}); setChainMode({});
     setChainOnsiteSigs({}); setOnsitePadSlot(null);
     setPhotos([]);
   }, [templateId, selectedAssetId]);
+
+  // ذخیره‌ی خودکار پیش‌نویس (با کمی تأخیر تا با هر کلید نوشته نشود)
+  useEffect(() => {
+    if (!templateId || !selectedAssetId) return;
+    const t = setTimeout(() => saveDraft(dKey, { answers, notes, dueDate }), 500);
+    return () => clearTimeout(t);
+  }, [answers, notes, dueDate, dKey]);
 
   /**
    * «حضوری» باید همان لحظه پد امضا را باز کند. ولی امضا یک اظهار شخصی است و
@@ -8792,6 +8944,39 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
 
   const preview = scoreRecord(template, answers);
 
+  // پیشرفت و آیتم‌های بی‌پاسخ — قبلاً آیتم بی‌پاسخ بی‌صدا «۰ امتیاز» می‌گرفت و بدون هیچ هشداری ثبت می‌شد
+  const needItems = (template.items || []).filter(itemNeedsAnswer);
+  const missing = needItems.filter(it => !isAnswered(it, answers[it.id]));
+  const missingIds = new Set(missing.map(m => m.id));
+  const doneCount = needItems.length - missing.length;
+  const groupStats = {};
+  needItems.forEach(it => {
+    const g = it.group || '';
+    const s = groupStats[g] || (groupStats[g] = { total: 0, done: 0, fillable: 0 });
+    s.total++;
+    if (isAnswered(it, answers[it.id])) s.done++;
+    else if (it.type === 'yesno' && !it.critical) s.fillable++;
+  });
+  const fillableAll = Object.keys(groupStats).reduce((n, g) => n + groupStats[g].fillable, 0);
+  // «همه بله»: فقط آیتم‌های بله/خیرِ غیرحیاتیِ بی‌پاسخ؛ آیتم حیاتی باید آگاهانه جواب بگیرد
+  const markAllYes = (groupName) => setAnswers(a => {
+    const n = Object.assign({}, a);
+    (template.items || []).forEach(it => {
+      if (it.type !== 'yesno' || it.critical || !itemNeedsAnswer(it)) return;
+      if (groupName !== undefined && (it.group || '') !== groupName) return;
+      if (!isAnswered(it, n[it.id])) n[it.id] = 'بله';
+    });
+    return n;
+  });
+  const jumpToFirstMissing = () => {
+    if (!missing.length) return;
+    setShowMissing(true);
+    try {
+      const el = document.querySelector('[data-item-id="' + missing[0].id + '"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+  };
+
   // پیوست عکس: انتخاب از گالری/دوربین، فشرده‌سازی، و افزودن تا سقف مجاز
   const onPickPhotos = async (e) => {
     const files = Array.from((e.target && e.target.files) || []);
@@ -8815,13 +9000,20 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
   // است، نه اینکه دکمه را بزند و یک toast قرمز بگیرد.
   const blockReason = !inspectorName
     ? 'حساب کاربری شما نام کامل ندارد؛ از ادمین بخواهید نام شما را تکمیل کند.'
+    : (missing.length
+      ? (toPersianDigits(missing.length) + ' آیتم هنوز پاسخ ندارد (اولی: «' + String(missing[0].label).slice(0, 40) + '») — بله/خیر یا «کاربرد ندارد» را بزنید.')
     : (!signatures.inspector
       ? 'امضای بازرس / اجراکننده ثبت نشده است.'
-      : (requiredSlots.length ? validateSignChain(chainSel, data.users, currentUser, data.settings, requiredSlots) : null));
+      : (requiredSlots.length ? validateSignChain(chainSel, data.users, currentUser, data.settings, requiredSlots) : null)));
 
   const submit = () => {
     if (!inspectorName) {
       notify('حساب کاربری شما نام کامل ندارد. از ادمین بخواهید نام شما را در صفحه «کاربران» تکمیل کند.', 'error');
+      return;
+    }
+    if (missing.length) {
+      notify(toPersianDigits(missing.length) + ' آیتم بدون پاسخ مانده است؛ همه‌ی موارد را پاسخ دهید یا «کاربرد ندارد» بزنید.', 'error');
+      jumpToFirstMissing();
       return;
     }
     if (!signatures.inspector) { notify('امضای بازرس / اجراکننده الزامی است.', 'error'); return; }
@@ -8986,6 +9178,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         })
         .catch(e => notify('سابقه ثبت شد، اما ساخت PDF در درایو ناموفق بود: ' + e.message, 'error'));
     }
+    clearDraft(dKey);
     setSubmitting(false);
     if (onFinish) onFinish(finalRecord);
   };
@@ -9003,7 +9196,7 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
           </Field>
           <Field label="۲. تجهیز / زیرسیستم" hint="فقط زیرسیستم‌های همین چک‌لیست فهرست می‌شوند.">
             <select className={inputCls} value={selectedAssetId} onChange={e => setSelectedAssetId(e.target.value)}>
-              {assetsOfTemplate.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+              {assetsOfTemplate.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}{a.attrs && a.attrs.plate ? ' — ' + a.attrs.plate : ''}</option>)}
             </select>
           </Field>
           <Field label="دوره‌ی این چک‌لیست"
@@ -9057,15 +9250,47 @@ function RunnerPage({ assetId, assignmentId, onFinish }) {
         );
       })()}
 
+      {draftRestored && (
+        <div className="rounded-2xl border border-brand-200 bg-brand-50 p-3 text-xs text-brand-800 flex flex-wrap items-center justify-between gap-2">
+          <span>پاسخ‌های نیمه‌تمام قبلیِ این چک‌لیست و تجهیز بازیابی شد.</span>
+          <button type="button" onClick={() => { clearDraft(dKey); setAnswers(prefillAnswersFromAsset(template, asset)); setNotes(''); setDueDate(''); setDraftRestored(false); setShowMissing(false); }}
+            className="text-brand-700 hover:underline">شروع از نو</button>
+        </div>
+      )}
+
+      {needItems.length > 0 && (
+        <div className="sticky top-2 z-20 bg-white/95 backdrop-blur rounded-2xl border border-slate-200 shadow-sm p-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-medium text-slate-700">
+              پیشرفت: {toPersianDigits(doneCount)} از {toPersianDigits(needItems.length)} آیتم
+              {missing.length === 0 && <span className="text-ok-700 mr-1.5">✓ همه پاسخ داده شد</span>}
+            </span>
+            <span className="text-slate-500">امتیاز فعلی: <b className={preview.criticalFail ? 'text-danger-600' : 'text-slate-800'}>{toPersianDigits(preview.percent)}٪</b>{preview.criticalFail ? ' (حیاتی ناموفق)' : ''}</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-brand-600 transition-all" style={{ width: Math.round(doneCount / needItems.length * 100) + '%' }} /></div>
+          <div className="flex flex-wrap gap-2">
+            {fillableAll > 0 && <button type="button" onClick={() => markAllYes()} className="text-xs rounded-lg px-3 py-1.5 bg-ok-50 text-ok-700 hover:bg-ok-100">✓ بقیه‌ی موارد غیرحیاتی «بله» ({toPersianDigits(fillableAll)})</button>}
+            {missing.length > 0 && <button type="button" onClick={jumpToFirstMissing} className="text-xs rounded-lg px-3 py-1.5 bg-warn-50 text-warn-700 hover:bg-warn-100">↓ اولین بی‌پاسخ ({toPersianDigits(missing.length)})</button>}
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
         <h3 className="font-bold text-slate-800">آیتم‌های بازرسی</h3>
         {template.items.map((item, ix) => {
           const prevGroup = ix > 0 ? (template.items[ix - 1].group || '') : '';
           const showGroup = !!item.group && item.group !== prevGroup;
+          const gs = groupStats[item.group || ''];
+          const isMissing = showMissing && missingIds.has(item.id);
           return (
             <Fragment key={item.id}>
-              {showGroup && <h4 className="text-xs font-bold text-brand-700 bg-brand-50 rounded-lg px-3 py-1.5 mt-2">{item.group}</h4>}
-          <div key={item.id} className="border-b border-slate-100 pb-4 last:border-0 last:pb-0">
+              {showGroup && (
+                <div className="flex items-center justify-between gap-2 text-xs font-bold text-brand-700 bg-brand-50 rounded-lg px-3 py-1.5 mt-2">
+                  <span>{item.group}{gs ? <span className="font-normal text-brand-600 mr-2">{toPersianDigits(gs.done)}/{toPersianDigits(gs.total)}</span> : null}</span>
+                  {gs && gs.fillable > 0 && <button type="button" onClick={() => markAllYes(item.group)} className="font-normal text-[11px] rounded-md px-2 py-0.5 bg-white text-ok-700 hover:bg-ok-50">✓ بقیه‌ی این بخش «بله»</button>}
+                </div>
+              )}
+          <div data-item-id={item.id} className={"border-b border-slate-100 pb-4 last:border-0 last:pb-0 " + (isMissing ? "rounded-xl ring-2 ring-danger-500/50 p-2 -m-2 bg-danger-50/30" : "")}>
             <div className="flex items-start justify-between mb-2">
               <p className="text-sm font-medium text-slate-700">{item.label}
                 {item.critical && <span className="text-danger-500 mr-1.5 text-xs">(حیاتی)</span>}
@@ -9329,7 +9554,7 @@ const REPORT_STYLE = `
 
 /** نشانِ ساخت — برای راستی‌آزمایی «کدام نسخه روی دستگاه کاربر اجرا می‌شود».
    در پایین صفحه‌ی ورود و بخش تنظیمات نمایش داده می‌شود. */
-const APP_BUILD = 'B-14050626r10';
+const APP_BUILD = 'B-14050626r11';
 
 const POPUP_BLOCKED_MSG = 'مرورگر جلوی باز شدن پنجره‌ی چاپ را گرفت. لطفاً pop-up این سایت را مجاز کنید و دوباره تلاش کنید.';
 
@@ -11188,7 +11413,7 @@ function UsersPage() {
 const APPS_SCRIPT_CODE = `/**
  * =====================================================================
  *  سامانه چک‌لیست درکاو — لایه سرور (Google Apps Script)
- *  نسخه: 9.1
+ *  نسخه: 9.2
  * =====================================================================
  *
  *  تغییرات کلیدی نسبت به نسخه ۷:
@@ -11257,6 +11482,10 @@ const APPS_SCRIPT_CODE = `/**
  *        سرور به‌عنوان «پروکسی دریافت آدرس دلخواه» سوءاستفاده نشود. پاسخ، زمان ساخت (ms) را هم دارد.
  *      • media.images: کش ۶ ساعته‌ی تصاویر کوچک (امضاها) با CacheService.getAll/putAll؛ تصاویر
  *        تکراری دوباره از Drive خوانده نمی‌شوند. سقف زمانی ۱۵۰ ثانیه برای یک درخواست.
+ *
+ *  ۱۵. چک‌لیست‌های پیشنهادی (نسخه ۹.۲): تنظیم همگام‌شونده‌ی «libSeeded». قالب‌های پیشنهادی فقط یک‌بار
+ *      (روی دستگاه مدیر، پس از اولین همگام‌سازی) داخل فهرست قالب‌های خود کاربر درج می‌شوند و بعد از آن
+ *      با این نشانه روی همه‌ی دستگاه‌ها دیگر درج نمی‌شوند؛ پس قالبی که کاربر حذف کرده برنمی‌گردد.
  *  =====================================================================
  *  راهنمای نصب
  *  =====================================================================
@@ -11288,7 +11517,7 @@ const APPS_SCRIPT_CODE = `/**
    ۰. پیکربندی
    ===================================================================== */
 
-var SERVER_VERSION = "9.1";
+var SERVER_VERSION = "9.2";
 var LOCK_WAIT_MS = 25000;
 var DEFAULT_RATE_LIMIT = 240; // چند دستگاه هم‌زمان یک سبد مشترک دارند
 var MAX_CLOCK_SKEW_SECONDS = 300;
@@ -12123,6 +12352,7 @@ function getSettings(ss) {
     orgName: s.orgName || "",
     passThreshold: toNum(s.passThreshold === undefined ? 80 : s.passThreshold),
     signFlowMode: s.signFlowMode === "single" ? "single" : "chain",
+    libSeeded: s.libSeeded || "",
     logoFileId: s.logoFileId || "",
     managerPinHash: s.managerPinHash || "",
     managerPinSalt: s.managerPinSalt || "",
@@ -13040,7 +13270,7 @@ function applySettingsSet_(ss, patch, rootBody) {
   var out = {};
   // «managerPinHashAlgo» (نام کلاینت) و «signFlowMode» هم پذیرفته می‌شوند —
   // پیش‌تر این دو بی‌صدا می‌افتادند و تنظیمات بین دستگاه‌ها یکدست نمی‌شد (۸.۲-الف).
-  ["orgName", "passThreshold", "signFlowMode", "managerPinHash", "managerPinSalt", "managerPinAlgo", "managerPinHashAlgo", "managerPinIterations"]
+  ["orgName", "passThreshold", "signFlowMode", "libSeeded", "managerPinHash", "managerPinSalt", "managerPinAlgo", "managerPinHashAlgo", "managerPinIterations"]
     .forEach(function (k) { if (patch[k] !== undefined) out[k] = patch[k]; });
   if (out.managerPinHashAlgo !== undefined) {
     if (!out.managerPinAlgo) out.managerPinAlgo = out.managerPinHashAlgo;
@@ -15881,7 +16111,7 @@ const NAV_ITEMS = [
 ];
 
 function AppShell() {
-  const { currentUser, logout, data, perms } = useAppData();
+  const { currentUser, logout, data, perms, update, notify } = useAppData();
   const [page, setPage] = useState('dashboard');
   const [runnerAssetId, setRunnerAssetId] = useState(null);
   const [runnerAssignmentId, setRunnerAssignmentId] = useState(null);
@@ -15894,6 +16124,27 @@ function AppShell() {
   const [onsiteRec, setOnsiteRec] = useState(null);
 
   const myPages = useMemo(() => (perms && perms.pages) || effectivePages(currentUser), [perms, currentUser]);
+
+  // چک‌لیست‌های پیشنهادی: یک‌بار، روی دستگاهِ «ادمین»، داخل فهرست قالب‌های خودش درج می‌شوند.
+  // (چرا ادمین: نوشتن «تنظیمات» روی سرور فقط برای ادمین مجاز است و نشانه‌ی «درج شد» جزو تنظیمات
+  //  همگام‌شونده است؛ اگر مدیرِ غیرادمین درج می‌کرد، سرور نشانه را رد می‌کرد و قالب‌های حذف‌شده برمی‌گشتند.)
+  //  • اگر اتصال ابری فعال است، تا اولین همگام‌سازیِ موفق صبر می‌کنیم (تا نشانه‌ی «قبلاً درج شده»‌ی
+  //    دستگاه‌های دیگر را بدانیم و قالب حذف‌شده برنگردد)؛
+  //  • اگر ابری نیست، همان لحظه.
+  useEffect(() => {
+    if (!perms || !perms.isAdmin || !data || !data.settings) return;
+    if (data.settings.libSeeded) return;
+    const cfg = resolveCloudConfig(data.settings);
+    const cloudOn = !!(cfg.url && cfg.apiKey);
+    if (cloudOn && !(Number(data.lastSyncAt) > 0)) return;
+    const add = libraryTemplatesToSeed(data);
+    update(d => {
+      add.forEach(t => d.templates.push(t));
+      d.settings.libSeeded = LIBRARY_VERSION;
+    });
+    if (add.length) notify(toPersianDigits(add.length) + ' چک‌لیست پیشنهادی به فهرست قالب‌های شما اضافه شد؛ هر کدام را می‌توانید ویرایش، بایگانی یا حذف کنید.', 'success');
+    // eslint-disable-next-line
+  }, [data && data.settings && data.settings.libSeeded, data && data.lastSyncAt, perms && perms.isAdmin]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -16152,5 +16403,5 @@ root.render(<App />);
     document.body.appendChild(scriptEl);
   })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3ce09653b3c9ec0',t:'MTc4OTcxMDI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
